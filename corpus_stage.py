@@ -77,7 +77,9 @@ def remote_listing(rem, sub):
     Duplicate titles in one folder make rclone report them; that is returned as an error."""
     p = rc(["lsjson", "-R", "--files-only", "--hash", "--hash-type", "md5", rem + sub], check=False)
     if p.returncode != 0:
-        if "directory not found" in p.stderr or "not found" in p.stderr.lower():
+        # Only a missing folder on Drive counts as "empty". A missing rclone config or remote must never look like
+        # an empty Drive (rclone's own notice says "Config file ... not found", so do not match a bare "not found").
+        if "directory not found" in p.stderr and "didn't find section" not in p.stderr and "Failed to create file system" not in p.stderr:
             return {}, []
         raise RuntimeError("lsjson failed: " + p.stderr.strip()[-400:])
     out, names = {}, {}
@@ -153,7 +155,19 @@ def cmd_setup(a):
     return 0 if p.returncode == 0 else 3
 
 
+def ensure_remotes():
+    """Stop with a clear error when rclone has no clients:/ops: remotes (no config), instead of staging an empty Drive."""
+    have = rc(["listremotes"], check=False).stdout.split()
+    want = [remote("clients"), remote("ops")]
+    missing = [w for w in want if w not in have]
+    return missing
+
+
 def cmd_pull(a):
+    missing = ensure_remotes()
+    if missing:
+        print(json.dumps({"ok": False, "error": "rclone remotes not configured: " + ", ".join(missing) + " (run container-setup.sh)"}))
+        return 3
     clients = [l.strip() for l in open(a.clients_file) if l.strip()] if a.clients_file else []
     snap_path = os.path.join(root(), SNAP)
     prev = {"trees": {}, "meta": {}}
@@ -178,7 +192,8 @@ def cmd_pull(a):
         if rsub.endswith((".json", ".md")):  # a single file
             os.makedirs(os.path.dirname(lbase), exist_ok=True)
             p = rc(["copyto", rem + rsub, lbase], check=False)
-            if p.returncode != 0 and "not found" in p.stderr.lower():
+            if p.returncode != 0 and ("directory not found" in p.stderr or "object not found" in p.stderr) \
+                    and "didn't find section" not in p.stderr and "Failed to create file system" not in p.stderr:
                 snap[lbase] = {}
                 report.append({"target": label, "files": 0, "note": "absent on Drive"})
                 continue
