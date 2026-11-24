@@ -68,6 +68,12 @@ echo "shadow now" > "$SH/now.md"; $S push >/dev/null
 chk "shadow file pushed" "grep -q 'shadow now' '$T/drive-clients/Acme/Claude Project Knowledge Base (shadow)/now.md'"
 # duplicate titles on Drive -> pull refuses that client
 cp "$T/drive-clients/Beta/Claude Project Knowledge Base" /dev/null 2>&1
+# after a push, status shows nothing left to send; many files push correctly in parallel
+$S pull --fresh --clients-file $T/clients.txt >/dev/null
+for i in $(seq 1 12); do echo "file $i" > "$M/par-$i.md"; done
+$S push > "$T/o7"; chk "parallel push of 12 files ok" "[ \$? -eq 0 ] && [ \$(python3 -c \"import json;print(sum(r['status']=='pushed' for r in json.load(open('$T/o7'))['results']))\") -eq 12 ]"
+chk "all 12 landed on Drive" "[ \$(ls '$KB'/par-*.md | wc -l) -eq 12 ]"
+$S status | grep -q '"would_push": \[\]'; chk "status empty after a push" "[ \$? -eq 0 ]"
 # no rclone config at all must be an error, never an empty Drive
 : > "$T/empty.conf"; RCLONE_CONFIG="$T/empty.conf" STAGE_ROOT="$T/mount-none" $S pull --fresh > "$T/o6"; rc6=$?
 chk "missing rclone config fails the pull" "[ $rc6 -eq 3 ] && grep -q 'not configured' $T/o6"
