@@ -37,6 +37,54 @@ class Advise(unittest.TestCase):
         for why in cr.BENIGN:
             self.assertNotIn(why, cr.ADVICE)
 
+class PendingWatch(unittest.TestCase):
+    def setUp(self):
+        import tempfile, json
+        self.tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = self.tmp
+        os.environ["CORPUS_WORK"] = os.path.join(self.tmp, "work")
+        os.makedirs(cr.runs_dir())
+        self.json = json
+
+    def test_stuck_and_failed_lines(self):
+        old = "2026-01-01T00:00:00.000Z"
+        new = cr.now_iso()[:19] + ".000Z"
+        pend = [{"Path": "Alpha/%s/pending-2026-01-01-a-1.json" % cr.KB, "ModTime": old},
+                {"Path": "Alpha/%s/pending-2026-01-01-b-2.json" % cr.KB, "ModTime": old},
+                {"Path": "Beta/%s/pending-2026-11-24-c-1.json" % cr.KB, "ModTime": new},
+                {"Path": "Gamma/%s/pending-failures.json" % cr.KB, "ModTime": old}]
+        cr.write_pending_watch(pend, {"Alpha": "1", "Beta": "2", "Gamma": "3"})
+        text = self.advise()
+        self.assertIn("Alpha: 2 waiting", text)
+        self.assertNotIn("Beta", text)          # filed minutes ago: not stuck
+        self.assertIn("Gamma: 1 failed", text)
+
+    def test_applied_syncs_drop_out_at_finish(self):
+        old = "2026-01-01T00:00:00.000Z"
+        pend = [{"Path": "Alpha/%s/pending-2026-01-01-a-1.json" % cr.KB, "ModTime": old},
+                {"Path": "Alpha/%s/pending-2026-01-01-b-2-p1.json" % cr.KB, "ModTime": old}]
+        cr.write_pending_watch(pend, {"Alpha": "1"})
+        cr.save("applied-syncs.json", ["2026-01-01-a-1"])
+        cr.update_pending_watch()
+        w = self.json.load(open(cr.watch_path()))["clients"]
+        self.assertEqual([x["file"] for x in w["Alpha"]["waiting"]], ["pending-2026-01-01-b-2-p1.json"])
+        cr.save("applied-syncs.json", ["2026-01-01-a-1", "2026-01-01-b-2"])
+        cr.update_pending_watch()
+        self.assertEqual(self.json.load(open(cr.watch_path()))["clients"], {})
+        self.assertNotIn("Syncs not applied", self.advise())
+
+    def advise(self):
+        import io, contextlib
+        class A: run = None; hours = 24
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_advise(A)
+            except SystemExit:
+                pass
+        return self.json.loads(buf.getvalue())["text"]
+
+
 class FolderNames(unittest.TestCase):
     def test_short_name_maps_to_folder_name(self):
         import json, tempfile
