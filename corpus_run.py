@@ -15,12 +15,14 @@ This tool does the repeated mechanical parts, in the order a run needs them, and
   shadow CLIENT              nightly only: stage the client's shadow corpus folder for a build request
   apply-pending CLIENT       undo copies + apply a client's pending syncs (restores on a crash)
   undo CLIENT                undo copies before a sweep writes (safe to repeat)
+  drive-diff CLIENT          the client's Drive files that are new or changed against its manifest
+  demote CLIENT [--file F]   nightly only: demote an over-budget current-state.md or now.md (handles the undo copies)
   record-swept CLIENT        record a client as swept (builds the --file list from the undo folder)
   wrap CLIENT                after a client's writes: maintenance, brief.json, company index
   finish [--no-push]         finish the record, fold the tidy queue, push everything to Drive
 
 Environment: STAGE_ROOT (as corpus_stage.py), SKILL_DIR (default: the installed client-corpus
-skill), CORPUS_WORK (scratch folder, default ~/.corpus-work). Exit 3 means stop and treat as an error.
+skill), CORPUS_WORK (scratch folder, default ~/.corpus-work), GMAIL_SWEEP (on|off, default off). Exit 3 means stop and treat as an error.
 """
 import argparse, glob, json, os, shutil, subprocess, sys, time
 from datetime import datetime, timezone
@@ -124,6 +126,22 @@ def record_client(client_short, outcome, reason=None, sources="", extra=None):
         a += ["--sources", sources]
     a += extra or []
     return jpy("unattended.py", a)
+
+
+def gmail_on():
+    """GMAIL_SWEEP=on lets a run sweep Gmail. Off by default: the service account's mailbox holds no Clients/* labels,
+    so client email reaches the corpus through people's own sweeps (pending syncs), not through this task."""
+    return os.environ.get("GMAIL_SWEEP", "off").strip().lower() in ("on", "1", "yes", "true")
+
+
+def strip_gmail(plan):
+    """Drop the gmail source from every planned and carried-over client (the carry-over is written to the run
+    state by `record finish`, so a later hourly run must not inherit a source this task cannot read)."""
+    for key in ("sweep_now", "carry_over"):
+        for c in plan.get(key, []):
+            if "sources" in c:
+                c["sources"] = [x for x in c["sources"] if x != "gmail"]
+    return plan
 
 
 def short_of(client):
@@ -232,7 +250,8 @@ def cmd_discover(a):
         save("activity.json", activity)
     save("changes.json", changes)
     save("candidates.json", {c: dict(v, folder_id=ids[c]) for c, v in byc.items()})
-    event("source", "drive (Drive API listing via rclone): %d files since last run, %d pending syncs" % (len(changes), len(pend)))
+    npend = sum(len(v["pending"]) for v in byc.values())
+    event("source", "drive (Drive API listing via rclone): %d files since last run, %d pending syncs" % (len(changes), npend))
     out({"ok": True, "mode": s.get("mode"), "files_changed": len(changes), "since": s["since"], "active_clients_90d": len(activity),
          "clients": [{"folder_name": c, "folder_id": ids[c], "changed_files": v["changes"], "pending": v["pending"]} for c, v in sorted(byc.items())],
          "next": "look up each client's stage on the Accounts board (Account Status, Short name), write stages.json {folder_name: {short, stage}}, then run plan"})
@@ -263,6 +282,9 @@ def cmd_plan(a):
     rc, plan = jpy("unattended.py", args)
     if rc != 0:
         out({"ok": False, "error": "plan failed", "detail": plan}, 3)
+    if not gmail_on():
+        strip_gmail(plan)
+        event("source", "gmail: not swept by this task (owner setting); client email arrives through people's own sweeps")
     save("plan.json", plan)
     byshort = {r["short_name"]: r["folder_name"] for r in reg}
     sweep = [byshort.get(c["client"], c["client"]) for c in plan["sweep_now"]]
@@ -342,17 +364,22 @@ def cmd_undo(a):
     out({"ok": not bad, "files": done, "failed": bad}, 0 if not bad else 3)
 
 
+def _pend_id(fname):
+    """pending-2026-11-17-aayushb-1630-p1.json -> 2026-11-17-aayushb-1630 (a multi-part sync is one id)."""
+    import re
+    return re.sub(r"-p\d+$", "", fname[len("pending-"):-len(".json")])
+
+
 def cmd_apply(a):
     s = state()
     kb = kb_of(a.client)
     short = short_of(a.client)
     pend = sorted(f for f in os.listdir(kb) if f.startswith("pending-") and f.endswith(".json") and f != "pending-failures.json")
-    known = set()
     try:
         known = {x["id"] for x in json.load(open(os.path.join(kb, "pending-failures.json"))).get("failed", [])}
     except Exception:  # noqa: BLE001
-        pass
-    fresh = [f for f in pend if f[len("pending-"):-len(".json")] not in known]
+        known = set()
+    fresh = [f for f in pend if _pend_id(f) not in known]
     if not fresh:
         out({"ok": True, "applied": [], "skipped": "no pending syncs" if not pend else "only syncs already recorded as failed"})
     done, bad = undo_files(a.client)
@@ -360,7 +387,7 @@ def cmd_apply(a):
         record_client(short, "failed", "undo-copy-failed", "drive")
         out({"ok": False, "error": "undo copy failed: " + ", ".join(bad)}, 3)
     rc, d = jpy("sync.py", ["apply-pending", "--kb", kb])
-    if rc != 0 or "applied" not in d:
+    if "applied" not in d:  # the script crashed or printed nothing usable (sync.py exits 1 when a sync is left failed, with JSON)
         restored = []
         for f in done:  # put back anything the crashed apply touched
             u = os.path.join(kb, "archive", "undo", s["run_id"], f)
@@ -370,12 +397,50 @@ def cmd_apply(a):
         record_client(short, "failed", "write-failed", "drive")
         event("maintainer-note", "%s: pending sync not applied: apply-pending error; restored %s" % (short, ",".join(restored) or "nothing"))
         out({"ok": False, "error": "apply-pending failed", "detail": (d.get("raw") or "")[-600:], "restored": restored}, 3)
-    if d.get("failed"):
-        event("maintainer-note", "%s: pending sync failed to apply" % short)
-    out({"ok": True, "applied": [x["id"] for x in d["applied"]], "failed": d.get("failed"), "waiting": d.get("waiting_for_parts"),
+    new_fail = [f for f in d.get("failed", []) if f.get("id") not in known]
+    if new_fail:  # a newly failed sync is news; one already in pending-failures.json is not repeated every run
+        event("maintainer-note", "%s: pending sync failed to apply: %s" % (short, "; ".join("%s (%s)" % (f.get("id"), (f.get("errors") or [""])[0][:60]) for f in new_fail)))
+    out({"ok": True, "applied": [x["id"] for x in d["applied"]], "failed": d.get("failed"), "new_failures": [f.get("id") for f in new_fail],
+         "waiting": d.get("waiting_for_parts"),
          "board_payloads": [dict(id=x["id"], **{k: x["board_payload"][k] for k in ("boardId", "itemId", "columnValues")})
                             for x in d["applied"] if x.get("board_payload")],
          "board_queue": d.get("board_queue")})
+
+
+def cmd_drive_diff(a):
+    """Files in the client's Drive folder that are new or changed against the corpus manifest (the whole folder,
+    as unattended.md step 4 asks; the change list only says which clients to visit)."""
+    cands = load("candidates.json", {})
+    fid = cands.get(a.client, {}).get("folder_id")
+    kb = kb_of(a.client)
+    try:
+        man = json.load(open(os.path.join(kb, "source-manifest.json")))
+    except Exception as e:  # noqa: BLE001
+        out({"ok": False, "error": "manifest unreadable: %s" % e}, 3)
+    known = {}
+    for r in man.get("sources", []):
+        if r.get("type") == "drive" and r.get("id"):
+            known[r["id"]] = r.get("modifiedTime") or ""
+    listing = json.loads(rclone(["lsjson", "clients:%s" % a.client, "-R", "--fast-list", "--files-only", "--no-mimetype",
+                                 "--filter", "- %s/**" % KB, "--filter", "- **/%s/**" % KB, "--filter", "- %s (shadow)/**" % KB,
+                                 "--filter", "- **/%s (shadow)/**" % KB, "--filter", "+ **"]).stdout or "[]")
+    new, changed = [], []
+    for e in listing:
+        mt = e["ModTime"][:19] + "Z"
+        row = {"file_id": e["ID"], "title": e["Path"].split("/")[-1], "path": e["Path"].split("/")[:-1], "modified_time": mt, "size": e.get("Size")}
+        if e["ID"] not in known:
+            new.append(row)
+        elif known[e["ID"]] and mt > known[e["ID"]][:19] + "Z":
+            changed.append(row)
+    ls = man.get("last_sweep")
+    vals = list(ls.values()) if isinstance(ls, dict) else ([ls] if isinstance(ls, str) else [])
+    since = max([v[:19] + ("Z" if len(v) <= 10 or not v.endswith("Z") else "") if len(v) > 10 else v + "T00:00:00Z" for v in vals if v] or [""])
+    since = since[:19] + "Z" if since else ""
+    # The manifest keeps rows only for sources that contributed a fact, so most older files are simply
+    # unrecorded and are not news. What a sweep reads: changed rows, plus files modified since the last sweep.
+    recent = [r for r in changed + new if not since or r["modified_time"] > since]
+    out({"ok": True, "client": a.client, "last_sweep": since or None, "drive_files": len(listing), "manifest_drive_rows": len(known),
+         "to_read": recent, "older_ignored": len(changed) + len(new) - len(recent)})
 
 
 def cmd_record_swept(a):
@@ -387,7 +452,10 @@ def cmd_record_swept(a):
         for f in sorted(os.listdir(ud)):
             args += ["--file", "%s=%s/%s/archive/undo/%s/%s" % (f, a.client, KB, s["run_id"], f)]
     args += ["--board", a.board]
-    rc, d = record_client(a.short or short_of(a.client), "swept", None, a.sources, args)
+    shorts = load("shorts.json", {}) or {}
+    if a.client not in shorts:
+        out({"ok": False, "error": "unknown client folder name %r: use the Drive folder name from discover/plan" % a.client}, 3)
+    rc, d = record_client(shorts[a.client], "swept", None, a.sources, args)
     out({"ok": rc == 0, "detail": d if rc else None}, 0 if rc == 0 else 3)
 
 
@@ -484,6 +552,11 @@ def cmd_maintenance(a):
     names = [i.get("folder_name") or fold.get(i.get("client")) or i.get("client") for i in items if isinstance(i, dict)]
     ids = {e["Name"]: e["ID"] for e in json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)}
     staged, notes = [], {}
+    shorts = load("shorts.json", {}) or {}
+    for i, n in zip(items, names):  # so `record-swept` and `wrap` accept a maintenance client the plan never listed
+        if n and isinstance(i, dict):
+            shorts.setdefault(n, i.get("client") or n)
+    save("shorts.json", shorts)
     names = [n for n in names if n]
     if names:
         cf = os.path.join(work(), "maint-clients.txt")
@@ -501,6 +574,52 @@ def cmd_maintenance(a):
                 staged.append(n)
     out({"ok": True, "raw": d, "staged": staged, "not_staged": notes,
          "folder_ids": {n: ids.get(n) for n in names}})
+
+
+def cmd_demote(a):
+    """Nightly demotion for one client: demote.py plans the moves, dry-runs, then applies. demote.py takes its own
+    undo copies and refuses if they exist, so any copy `undo` already made for this run is set aside first and put
+    back afterwards when the script did not make its own."""
+    s = state()
+    if s.get("mode") != "nightly":
+        out({"ok": False, "error": "demotion is for nightly runs"}, 3)
+    kb = kb_of(a.client)
+    plan_f, moves_f = os.path.join(work(), "demote-plan.json"), os.path.join(work(), "demote-moves.json")
+    p = py("demote.py", ["plan", "--kb", kb, "--file", a.file, "--emit-moves", moves_f])
+    try:
+        pl = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        out({"ok": False, "error": "demote plan failed", "detail": (p.stdout + p.stderr)[-400:]}, 3)
+    if not pl.get("fails_budget"):
+        out({"ok": True, "demoted": False, "note": "%s is within budget (%s of %s bytes)" % (a.file, pl.get("bytes"), pl.get("budget"))})
+    if pl.get("rewrites_needed"):
+        out({"ok": False, "demoted": False, "needs_rewrite": pl["rewrites_needed"],
+             "note": "narrative sections must shrink as well as move: write the rewrites into the moves file (%s) as nightly-maintenance.md section 1 says, then run demote.py apply yourself" % moves_f}, 3)
+    ud = os.path.join(kb, "archive", "undo", s["run_id"])
+    held = os.path.join(work(), "held-undo-" + a.client.replace("/", "_"))
+    os.makedirs(held, exist_ok=True)
+    if os.path.isdir(ud):
+        for f in os.listdir(ud):
+            shutil.move(os.path.join(ud, f), os.path.join(held, f))
+    base = ["apply", "--kb", kb, "--file", a.file, "--moves", moves_f, "--run-id", s["run_id"]]
+    rc, dry = jpy("demote.py", base + ["--dry-run"])
+    if not dry.get("ok"):
+        restore = True
+    else:
+        rc, res = jpy("demote.py", base)
+        restore = True
+    if restore and os.path.isdir(held):
+        os.makedirs(ud, exist_ok=True)
+        for f in os.listdir(held):
+            if not os.path.exists(os.path.join(ud, f)):
+                shutil.move(os.path.join(held, f), os.path.join(ud, f))
+    if not dry.get("ok"):
+        out({"ok": False, "error": "demote dry run refused", "detail": dry}, 3)
+    if not res.get("ok"):
+        out({"ok": False, "error": "demote apply failed", "detail": res}, 3)
+    out({"ok": True, "demoted": True, "file": a.file, "before": res.get("before"), "after": res.get("after"), "moved": res.get("moved"),
+         "changelog_line": res.get("changelog_line"), "undo_folder": res.get("undo_folder"),
+         "next": "put changelog_line in the client's changelog entry (sweep delta summary), then record and wrap"})
 
 
 def cmd_requests(a):
@@ -567,7 +686,9 @@ def main():
     p = sp.add_parser("plan"); p.add_argument("--stages", required=True); p.set_defaults(f=cmd_plan)
     p = sp.add_parser("apply-pending"); p.add_argument("client"); p.set_defaults(f=cmd_apply)
     p = sp.add_parser("undo"); p.add_argument("client"); p.set_defaults(f=cmd_undo)
-    p = sp.add_parser("record-swept"); p.add_argument("client"); p.add_argument("--short"); p.add_argument("--sources", default="drive")
+    p = sp.add_parser("drive-diff"); p.add_argument("client"); p.set_defaults(f=cmd_drive_diff)
+    p = sp.add_parser("demote"); p.add_argument("client"); p.add_argument("--file", default="current-state.md", choices=["current-state.md", "now.md"]); p.set_defaults(f=cmd_demote)
+    p = sp.add_parser("record-swept"); p.add_argument("client"); p.add_argument("--sources", default="drive")
     p.add_argument("--board", default="not-needed", choices=["ok", "failed", "skipped", "not-needed"]); p.set_defaults(f=cmd_record_swept)
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("finish"); p.add_argument("--no-push", action="store_true"); p.set_defaults(f=cmd_finish)
