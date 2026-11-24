@@ -6,3 +6,4 @@ CC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"; export CC
 export PATH="$HOME/.local/bin:$PATH"
 export STAGE_ROOT="${STAGE_ROOT:-$HOME/Library/CloudStorage/GoogleDrive-wisely-svc}"
 export GMAIL_SWEEP="${GMAIL_SWEEP:-off}"
+export PYTHONDONTWRITEBYTECODE=1   # no __pycache__ in the repo (a stop hook may ask the session to commit stray files)
