@@ -24,7 +24,7 @@ what changed goes back.
 A scheduled task (routine) in a cloud environment that has this repo as a source. The prompts find the checkout themselves, so the folder name does not matter.
 
 The environment needs:
-- **Secrets / environment variables** (set in the environment, never in the repo): `GDRIVE_SA_JSON` (the Hermes service-account key, JSON), `CLIENTS_DRIVE_ID` (`0AGyf2DLZP-r8Uk9PVA`) and `OPS_DRIVE_ID` (`0AFBBEThGl8jnUk9PVA`). `container-setup.sh` turns them into the `rclone` config and installs `rclone` (pinned, checksum-verified) if it is missing.
+- **Secrets / environment variables** (set in the environment, never in the repo): `GDRIVE_SA_JSON_B64` (the Hermes service-account key JSON, base64-encoded onto one line so the variable box cannot mangle it; plain `GDRIVE_SA_JSON` also works), `CLIENTS_DRIVE_ID` (`0AGyf2DLZP-r8Uk9PVA`) and `OPS_DRIVE_ID` (`0AFBBEThGl8jnUk9PVA`). `container-setup.sh` turns them into the `rclone` config and installs `rclone` (pinned, checksum-verified) if it is missing.
 - **Internet access** to `downloads.rclone.org` and `googleapis.com` (and GitHub for the checkout).
 - **Connectors** attached to the task: Google Drive, monday.com, Slack, and Gmail with a send tool (without a send tool the prompts post the alert to the Slack channel instead of emailing).
 - A permission mode that does not prompt; see `permissions.example.json`.
