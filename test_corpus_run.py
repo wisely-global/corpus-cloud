@@ -25,6 +25,19 @@ class Helpers(unittest.TestCase):
         del os.environ["GMAIL_SWEEP"]
         self.assertFalse(cr.gmail_on())  # off by default
 
+class Advise(unittest.TestCase):
+    def test_every_actionable_reason_has_commands(self):
+        for why in ("duplicate-titles", "mount-name-mismatch", "pending-entry", "missing-core", "old-shape", "over-budget",
+                    "stage-unknown", "write-failed", "maintenance-retry", "dropped-after-retries"):
+            meaning, cmds = cr.ADVICE[why]
+            self.assertTrue(meaning and cmds, why)
+            self.assertTrue(any("{c}" in c for c in cmds), why)
+
+    def test_benign_reasons_never_advised(self):
+        for why in cr.BENIGN:
+            self.assertNotIn(why, cr.ADVICE)
+
+
 
 if __name__ == "__main__":
     unittest.main()
