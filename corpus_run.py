@@ -223,6 +223,53 @@ def nightly_activity(ids, days=90):
         return [x for x in ex.map(one, rows) if x]
 
 
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def watch_path():
+    return os.path.join(runs_dir(), "pending-watch.json")
+
+
+def write_pending_watch(pend, ids):
+    """corpus-runs/pending-watch.json: what is waiting to be applied (and what failed), as of the last discover. It is how the
+    07:00 summary (which reads only the run records) can say a sync has waited more than a day."""
+    try:
+        old = json.load(open(watch_path())).get("clients", {})
+    except Exception:  # noqa: BLE001
+        old = {}
+    clients, failfile = {}, set()
+    for e in pend:
+        parts = e["Path"].split("/")
+        if parts[0] not in ids or not parts[2].startswith("pending-") or not parts[2].endswith(".json"):
+            continue
+        if parts[2] == "pending-failures.json":
+            failfile.add(parts[0])
+        else:
+            clients.setdefault(parts[0], {"waiting": [], "failed": []})["waiting"].append({"file": parts[2], "since": e["ModTime"][:19] + "Z"})
+    for c in failfile:  # a failure list that is still on Drive is still open
+        clients.setdefault(c, {"waiting": [], "failed": []})["failed"] = old.get(c, {}).get("failed") or ["see pending-failures.json"]
+    os.makedirs(runs_dir(), exist_ok=True)
+    json.dump({"updated": now_iso(), "clients": clients}, open(watch_path(), "w"), indent=1)
+
+
+def update_pending_watch():
+    """At finish: syncs applied this run are no longer waiting; syncs that failed to apply are recorded as failed."""
+    try:
+        w = json.load(open(watch_path()))
+    except Exception:  # noqa: BLE001
+        return
+    applied = set(load("applied-syncs.json", []))
+    failed = load("failed-syncs.json", {})
+    for c, v in list(w.get("clients", {}).items()):
+        v["waiting"] = [x for x in v.get("waiting", []) if _pend_id(x["file"]) not in applied]
+        if c in failed:
+            v["failed"] = failed[c]
+        if not v["waiting"] and not v.get("failed"):
+            del w["clients"][c]
+    json.dump(w, open(watch_path(), "w"), indent=1)
+
+
 def cmd_discover(a):
     s = state()
     since = parse_iso(s["since"])
@@ -252,6 +299,7 @@ def cmd_discover(a):
         parts = e["Path"].split("/")
         if parts[2].startswith("pending-") and parts[2].endswith(".json") and parts[2] != "pending-failures.json" and parts[0] in ids:
             byc.setdefault(parts[0], {"changes": 0, "pending": []})["pending"].append(parts[2])
+    write_pending_watch(pend, ids)
     activity = []
     if s.get("mode") == "nightly":
         activity = nightly_activity(ids)
@@ -407,6 +455,11 @@ def cmd_apply(a):
         record_client(short, "failed", "write-failed", "drive")
         event("maintainer-note", "%s: pending sync not applied: apply-pending error; restored %s" % (short, ",".join(restored) or "nothing"))
         out({"ok": False, "error": "apply-pending failed", "detail": (d.get("raw") or "")[-600:], "restored": restored}, 3)
+    save("applied-syncs.json", sorted(set(load("applied-syncs.json", [])) | {x["id"] for x in d["applied"]}))
+    if d.get("failed"):
+        ff = load("failed-syncs.json", {})
+        ff[a.client] = [f.get("id") for f in d["failed"]]
+        save("failed-syncs.json", ff)
     new_fail = [f for f in d.get("failed", []) if f.get("id") not in known]
     if new_fail:  # a newly failed sync is news; one already in pending-failures.json is not repeated every run
         event("maintainer-note", "%s: pending sync failed to apply: %s" % (short, "; ".join("%s (%s)" % (f.get("id"), (f.get("errors") or [""])[0][:60]) for f in new_fail)))
@@ -759,6 +812,23 @@ def cmd_advise(a):
         lines += ["  Do this: an unreachable source means a connector is signed out or failing: open Settings, Connectors and reconnect it, then the next run recovers by itself.",
                   "  An interrupted run left an in-progress record: nothing is lost (the next run asks Drive from the older time); runs stay blocked for up to three hours.", ""]
     try:
+        w = json.load(open(watch_path())).get("clients", {})
+    except Exception:  # noqa: BLE001
+        w = {}
+    cut = datetime.now(timezone.utc).timestamp() - 24 * 3600
+    stuck = {c: v for c, v in w.items() if any(parse_iso(x["since"]).timestamp() <= cut for x in v.get("waiting", []))}
+    failed = {c: v["failed"] for c, v in w.items() if v.get("failed")}
+    if stuck or failed:
+        lines.append("Syncs not applied")
+        lines.append("  People's saved chats and sweeps wait as pending syncs until a run applies them. These have not been applied:")
+        for c, v in sorted(stuck.items()):
+            oldest = min(x["since"] for x in v["waiting"])
+            lines.append("  %s: %d waiting, oldest filed %s UTC, owner: %s" % (c, len(v["waiting"]), oldest[:16].replace("T", " "), _owner_for(c)))
+        for c, ids_ in sorted(failed.items()):
+            lines.append("  %s: %d failed to apply (%s), owner: %s" % (c, len(ids_), ", ".join(str(i) for i in ids_[:3]), _owner_for(c)))
+        lines.append("  Do this: run /tidy \"CLIENT\" for each, which clears what blocks it (a duplicate file, an old-style note, an open session), then /sweep \"CLIENT\".")
+        lines.append("")
+    try:
         q = json.load(open(os.path.join(rd, "tidy-queue.json")))
         openq = [v for v in q.get("items", {}).values() if v.get("status") == "open"] if isinstance(q.get("items"), dict) else \
                 [v for k, v in q.get("items", []) if v.get("status") == "open"]
@@ -777,6 +847,7 @@ def cmd_finish(a):
     if rc != 0:
         out({"ok": False, "error": "record finish failed", "detail": d}, 3)
     jpy("unattended.py", ["tidy-queue", "--runs-dir", runs_dir()])
+    update_pending_watch()
     res = {"ok": True, "reply": d.get("reply")}
     if not a.no_push:
         p = stage(["push"])
