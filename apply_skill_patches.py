@@ -30,8 +30,12 @@ def main():
     if "def norm_last_sweep" in s:
         print("already applied")
         return 0
-    if s.count("def merge_rows(") != 1 or s.count('(man.get("last_sweep") or {}).values()') != 2 \
-            or s.count('man.setdefault("last_sweep", {})[member] = U.iso(now)') != 1:
+    olds = (s.count('(man.get("last_sweep") or {}).values()'), s.count('man.setdefault("last_sweep", {})[member] = U.iso(now)'))
+    if olds == (0, 0):
+        # The released skill (13.4 or later) no longer has the code this patch changes: the fix is upstream.
+        print("fixed upstream: nothing to patch")
+        return 0
+    if s.count("def merge_rows(") != 1 or olds != (2, 1):
         print("sync.py is not the version the patch was written for; not patched", file=sys.stderr)
         return 3
     s = s.replace("def merge_rows(", HELPER, 1)
