@@ -12,6 +12,8 @@ what changed goes back.
 | `job-prompt.md` | The hourly scheduled-task prompt (`/sweep changed`). |
 | `job-prompt-nightly.md` | The nightly scheduled-task prompt (`/sweep nightly`). |
 | `job-prompt-summary.md` | The daily summary email task (reads the run records, sends one email to the three maintainers, writes nothing). |
+| `permissions.example.json` | Pre-approval list for unattended sessions (allow the run's commands and connector tools, deny anything that deletes or drafts mail). Review before use. |
+| `test_corpus_run.py` | Unit tests for the helpers in `corpus_run.py`. |
 | `test_corpus_stage.sh` | Offline test (two local folders stand in for the shared drives). Run it after any change to `corpus_stage.py`. |
 | `patches/` | Fixes to the installed client-corpus skill that belong in the skill library source (`Chris Skills/Skill Sources/`). |
 
@@ -31,10 +33,15 @@ Needs: Python 3, curl, the `clients:` and `ops:` rclone remotes (Hermes service 
   The connector route stays as the fallback.
 - Clients whose corpus folder has same-named files on Drive are never staged; the run records `duplicate-titles` and the nightly run (or `/tidy`) fixes them.
 
+## Settings
+
+`GMAIL_SWEEP` (`on`/`off`, default `off`): the service account's mailbox holds no `Clients/*` labels, so Gmail is not swept by these runs. Client email reaches the corpus through people's own `/sweep` sessions, which file pending syncs that the hourly run applies.
+
 ## Tests
 
 ```
 bash test_corpus_stage.sh
+python3 test_corpus_run.py
 ```
 
 ## Scheduled tasks (all times NZ local)
