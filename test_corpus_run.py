@@ -37,6 +37,17 @@ class Advise(unittest.TestCase):
         for why in cr.BENIGN:
             self.assertNotIn(why, cr.ADVICE)
 
+class FolderNames(unittest.TestCase):
+    def test_short_name_maps_to_folder_name(self):
+        import json, tempfile
+        d = tempfile.mkdtemp(); os.environ["CORPUS_WORK"] = d
+        json.dump({"Service Foods": {"folder_id": "x"}}, open(os.path.join(d, "candidates.json"), "w"))
+        json.dump({"Service Foods": "Service Foods NZ"}, open(os.path.join(d, "shorts.json"), "w"))
+        self.assertEqual(cr.folder_name("Service Foods NZ"), "Service Foods")   # short name -> folder name
+        self.assertEqual(cr.folder_name("Service Foods"), "Service Foods")      # folder name unchanged
+        self.assertEqual(cr.folder_name("Unknown Client"), "Unknown Client")    # unknown passes through
+        del os.environ["CORPUS_WORK"]
+
 
 
 if __name__ == "__main__":
