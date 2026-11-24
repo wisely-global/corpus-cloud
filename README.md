@@ -11,6 +11,7 @@ what changed goes back.
 | `container-setup.sh` | Idempotent. Installs rclone (pinned, checksum-verified) if missing and proves both shared drives are readable. Put it in the environment's setup script. |
 | `job-prompt.md` | The hourly scheduled-task prompt (`/sweep changed`). |
 | `job-prompt-nightly.md` | The nightly scheduled-task prompt (`/sweep nightly`). |
+| `job-prompt-gmail-sweep.md` | A per-person scheduled task (own account, own machine, `30 0 * * *`): reads that person's labelled Gmail and files pending syncs, which the cloud hourly run applies. This is how client email reaches the corpus. |
 | `job-prompt-summary.md` | The daily summary email task (reads the run records, sends one email to the three maintainers, writes nothing). |
 | `permissions.example.json` | Pre-approval list for unattended sessions (allow the run's commands and connector tools, deny anything that deletes or drafts mail). Review before use. |
 | `test_corpus_run.py` | Unit tests for the helpers in `corpus_run.py`. |
@@ -50,6 +51,7 @@ python3 test_corpus_run.py
 |---|---|---|
 | Hourly sweep | `job-prompt.md` | `7 * * * *` |
 | Nightly maintenance | `job-prompt-nightly.md` | `30 1 * * *` (between the 01:07 and 02:07 hourly runs) |
-| Daily summary email | `job-prompt-summary.md` | `0 7 * * *` |
+| Daily summary email | `job-prompt-gmail-sweep.md` | A per-person scheduled task (own account, own machine, `30 0 * * *`): reads that person's labelled Gmail and files pending syncs, which the cloud hourly run applies. This is how client email reaches the corpus. |
+| `job-prompt-summary.md` | `0 7 * * *` |
 
 The three share one run state in `corpus-runs`: a run refuses to start while another began less than three hours ago.
