@@ -19,6 +19,7 @@ This tool does the repeated mechanical parts, in the order a run needs them, and
   demote CLIENT [--file F]   nightly only: demote an over-budget current-state.md or now.md (handles the undo copies)
   record-swept CLIENT        record a client as swept (builds the --file list from the undo folder)
   wrap CLIENT                after a client's writes: maintenance, brief.json, company index
+  advise [--run ID|--hours N] a plain-text "how to resolve" block (owner, what it means, commands) for the emails
   finish [--no-push]         finish the record, fold the tidy queue, push everything to Drive
 
 Environment: STAGE_ROOT (as corpus_stage.py), SKILL_DIR (default: the installed client-corpus
@@ -654,6 +655,113 @@ def cmd_shadow(a):
     out({"ok": not bad, "shadow_dir": os.path.join(root(), CLIENTS, a.client, KB + " (shadow)"), "problems": bad or None}, 0 if not bad else 3)
 
 
+
+# ---------------------------------------------------------------- advise
+FIX_VIA = ("Run these in a Claude session that has the client-corpus skill and the Drive connector "
+           "(Google Drive for desktop mounted is best). Nothing is deleted: the loser of a duplicate goes to the Drive trash.")
+ADVICE = {
+    "duplicate-titles": ("Two Drive files share a corpus file name, so the client cannot be staged or swept.",
+                         ['/tidy "{c}"   (shows the duplicates and the plan; approve once)', '/sweep "{c}"   (confirms the client sweeps clean)']),
+    "mount-name-mismatch": ("A corpus file shows under a different name on the mount than on Drive.",
+                            ['/tidy "{c}"', '/sweep "{c}"']),
+    "pending-entry": ("An old-style changelog-pending note is not folded into the changelog.",
+                      ['/tidy "{c}"   (folds it in, then archives it)', '/sweep "{c}"']),
+    "missing-core": ("current-state.md or source-manifest.json is not on Drive.",
+                     ['/tidy "{c}"   (restores the newest copy from archive/; if none, it offers to rebuild)', '/sweep "{c}"']),
+    "old-shape": ("The corpus is in an older shape and needs migrating.",
+                  ['/tidy "{c}"   (runs the migration from references/corpus-migration.md)', '/sweep "{c}"']),
+    "over-budget": ("current-state.md or now.md is over its size ceiling, so new material cannot be folded in.",
+                    ['/tidy "{c}"   (shows what moves where; the nightly run also demotes automatically)', '/sweep "{c}"']),
+    "stage-unknown": ("The Accounts board has no usable Account Status for this client, so it is not swept.",
+                      ['Set Account Status on the client\'s Accounts board item to Client, Past Client or Buying process', '/sweep "{c}"']),
+    "needs-question": ("The run reached a point that needed a person's judgement.", ['/tidy "{c}"', '/sweep "{c}"']),
+    "no-corpus": ("The client has a Drive folder but no corpus.", ['Ask for a build:  /sweep "{c}"  (offers to create the corpus; never started unattended)']),
+    "write-failed": ("A write did not complete; the run restored what it had changed.", ['/tidy "{c}"', '/sweep "{c}"']),
+    "undo-copy-failed": ("The undo copy could not be made, so nothing was written for this client.", ['Check Drive space and permissions on the client folder', '/sweep "{c}"']),
+    "readback": ("A written file did not read back at the size written; the run put the old file back.", ['/tidy "{c}"', '/sweep "{c}"']),
+    "manifest-shrank": ("source-manifest.json lost entries, so nothing was written.", ['/tidy "{c}"   (compare against archive/undo/ and restore)']),
+    "maintenance-retry": ("Tonight's maintenance fix did not complete; it is tried again tomorrow.", ['/tidy "{c}"   (to do it now with a person present)']),
+    "maintenance-failed": ("The nightly maintenance fix failed twice.", ['/tidy "{c}"', '/sweep "{c}"']),
+    "dropped-after-retries": ("The client failed three runs in a row and was dropped from the carry-over.", ['/tidy "{c}"', '/sweep "{c}"']),
+    "source-unreachable": ("A source for this client could not be read.", ['Check the connector named in the run record (Settings, Connectors), then /sweep "{c}"']),
+}
+BENIGN = {"prospect", "session-open", "not-recorded"}
+
+
+def _owner_for(client):
+    try:
+        o = json.load(open(os.path.join(runs_dir(), "tidy-owners.json")))
+    except Exception:  # noqa: BLE001
+        o = {}
+    return o.get(client) or o.get("default") or "Chris Upton"
+
+
+def cmd_advise(a):
+    """Plain-text 'how to resolve' block for the error and summary emails, built from the run records
+    (reason codes only: no client facts beyond names and file names)."""
+    import re
+    rd = runs_dir()
+    recs = []
+    for f in sorted(glob.glob(os.path.join(rd, "run-*.md"))):
+        try:
+            m = re.search(r"<!-- run-data: (.*) -->", open(f, encoding="utf-8").read(), re.S)
+            recs.append(json.loads(m.group(1)))
+        except Exception:  # noqa: BLE001
+            continue
+    if a.run:
+        recs = [r for r in recs if r.get("run_id") == a.run]
+    else:
+        cut = datetime.now(timezone.utc).timestamp() - a.hours * 3600
+        recs = [r for r in recs if r.get("started") and parse_iso(r["started"]).timestamp() >= cut]
+    recs.sort(key=lambda r: r.get("started") or "")
+    notes, infra, latest = {}, [], {}
+    for r in recs:
+        for e in r.get("events", []):
+            if e.get("kind") == "maintainer-note":
+                notes.setdefault(e["detail"].split(":")[0].strip(), []).append(e["detail"])
+            elif e.get("kind") in ("unreachable", "interrupted-run"):
+                infra.append("%s: %s" % (e["kind"], e["detail"]))
+        for c in r.get("clients", []):
+            latest[c["client"]] = (r["run_id"], c)      # only a client's latest record counts: a later clean sweep resolves it
+    items = {}
+    for client, (run, c) in latest.items():
+        if c.get("outcome") == "swept" and not [f for f in c.get("flags", []) if f in ADVICE]:
+            continue
+        reasons = [c.get("reason")] if c.get("reason") else []
+        reasons += [f for f in c.get("flags", []) if f in ADVICE]
+        for why in reasons:
+            if why and why not in BENIGN:
+                items[(client, why)] = run
+    lines = []
+    if items:
+        lines += ["How to resolve", FIX_VIA, ""]
+        for (client, why), run in sorted(items.items()):
+            meaning, cmds = ADVICE.get(why, ("See the run record for the reason.", ['/tidy "{c}"']))
+            lines.append("%s  [%s]  owner: %s" % (client, why, _owner_for(client)))
+            lines.append("  What it means: " + meaning)
+            for n in notes.get(client, [])[:2]:
+                lines.append("  Detail: " + n[:180])
+            lines.append("  Do this:")
+            lines += ["    " + c.format(c=client) for c in cmds]
+            lines.append("")
+    for line in sorted(set(infra)):
+        lines.append("Run-level: " + line)
+    if infra:
+        lines += ["  Do this: an unreachable source means a connector is signed out or failing: open Settings, Connectors and reconnect it, then the next run recovers by itself.",
+                  "  An interrupted run left an in-progress record: nothing is lost (the next run asks Drive from the older time); runs stay blocked for up to three hours.", ""]
+    try:
+        q = json.load(open(os.path.join(rd, "tidy-queue.json")))
+        openq = [v for v in q.get("items", {}).values() if v.get("status") == "open"] if isinstance(q.get("items"), dict) else \
+                [v for k, v in q.get("items", []) if v.get("status") == "open"]
+    except Exception:  # noqa: BLE001
+        openq = []
+    if openq:
+        old = [v for v in openq if (v.get("days") or 0) > 7]
+        lines.append("Tidy queue: %d open, %d older than 7 days (full list: corpus-runs/tidy-queue.md in Wisely Shared Config)." % (len(openq), len(old)))
+    out_text = "\n".join(lines).rstrip() or "Nothing to resolve in this window."
+    out({"ok": True, "records": len(recs), "text": out_text})
+
+
 def cmd_finish(a):
     s = state()
     rc, d = jpy("unattended.py", ["record", "finish", "--runs-dir", runs_dir(), "--run-id", s["run_id"], "--plan", os.path.join(work(), "plan.json")])
@@ -691,6 +799,7 @@ def main():
     p = sp.add_parser("record-swept"); p.add_argument("client"); p.add_argument("--sources", default="drive")
     p.add_argument("--board", default="not-needed", choices=["ok", "failed", "skipped", "not-needed"]); p.set_defaults(f=cmd_record_swept)
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
+    p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
     p = sp.add_parser("finish"); p.add_argument("--no-push", action="store_true"); p.set_defaults(f=cmd_finish)
     a = ap.parse_args()
     try:
