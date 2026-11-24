@@ -1,0 +1,46 @@
+{
+  "_comment": "Pre-approval for the unattended corpus runs. Merge into the scheduled task's settings (Claude Code settings.json 'permissions.allow'), or pass the same names as the extra allowed tools when the task is created. Review before use: it lets a headless session run these commands and tools without asking.",
+  "permissions": {
+    "allow": [
+      "Bash(python3 /work/corpus-cloud/corpus_run.py:*)",
+      "Bash(python3 /work/corpus-cloud/corpus_stage.py:*)",
+      "Bash(bash /work/corpus-cloud/container-setup.sh:*)",
+      "Bash(python3 *scripts/unattended.py:*)",
+      "Bash(python3 *scripts/sync.py:*)",
+      "Bash(python3 *scripts/demote.py:*)",
+      "Bash(python3 *scripts/budget_check.py:*)",
+      "Bash(python3 *scripts/verify_write.py:*)",
+      "Bash(rclone lsf:*)",
+      "Bash(rclone lsjson:*)",
+      "Bash(rclone cat:*)",
+      "Read(/work/corpus-cloud/**)",
+      "Read(~/Library/CloudStorage/**)",
+      "Write(~/Library/CloudStorage/**)",
+      "Edit(~/Library/CloudStorage/**)",
+      "mcp__claude_ai_Google_Drive__search_files",
+      "mcp__claude_ai_Google_Drive__get_file_metadata",
+      "mcp__claude_ai_Google_Drive__read_file_content",
+      "mcp__claude_ai_Google_Drive__trash_file",
+      "mcp__claude_ai_monday_com__search",
+      "mcp__claude_ai_monday_com__get_board_info",
+      "mcp__claude_ai_monday_com__get_board_items_page",
+      "mcp__claude_ai_monday_com__get_updates",
+      "mcp__claude_ai_monday_com__get_activity_logs",
+      "mcp__claude_ai_monday_com__change_item_column_values",
+      "mcp__claude_ai_Gmail__send_message",
+      "mcp__claude_ai_Slack__slack_send_message"
+    ],
+    "deny": [
+      "mcp__claude_ai_Slack__slack_read_channel",
+      "mcp__claude_ai_Slack__slack_read_thread",
+      "mcp__claude_ai_Gmail__create_draft",
+      "mcp__claude_ai_Gmail__reply",
+      "mcp__claude_ai_Gmail__forward",
+      "mcp__claude_ai_Gmail__trash_message",
+      "mcp__claude_ai_Gmail__trash_thread",
+      "Bash(rclone delete:*)",
+      "Bash(rclone purge:*)",
+      "Bash(rclone sync:*)"
+    ]
+  }
+}
