@@ -133,8 +133,11 @@ def cmd_setup(a):
         shutil.copy(os.path.join(tmp, "rclone-%s-linux-amd64" % v, "rclone"), bin_)
         os.chmod(bin_, 0o755)
     sa, cid, oid = env("GDRIVE_SA_JSON"), env("CLIENTS_DRIVE_ID"), env("OPS_DRIVE_ID")
+    if not sa and env("GDRIVE_SA_JSON_B64"):  # the same key, base64-encoded so an environment-variable box cannot mangle its quotes or \n escapes
+        import base64
+        sa = base64.b64decode(env("GDRIVE_SA_JSON_B64")).decode("utf-8")
     if not (sa and cid and oid):
-        print(json.dumps({"ok": False, "error": "need GDRIVE_SA_JSON, CLIENTS_DRIVE_ID, OPS_DRIVE_ID"}))
+        print(json.dumps({"ok": False, "error": "need GDRIVE_SA_JSON (or GDRIVE_SA_JSON_B64), CLIENTS_DRIVE_ID, OPS_DRIVE_ID"}))
         return 2
     json.loads(sa)  # must be valid JSON
     cfg = os.path.expanduser(env("RCLONE_CONFIG", "~/.config/rclone/rclone.conf"))
