@@ -261,10 +261,27 @@ def cmd_status(a):
     return 0
 
 
+def remote_stat(rem, path):
+    """One file's size and md5 on Drive (one small call, not a listing of the whole folder)."""
+    p = rc(["lsjson", rem + path, "--files-only", "--no-mimetype", "--hash", "--hash-type", "md5"], check=False)
+    if p.returncode != 0:
+        return None
+    try:
+        e = json.loads(p.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if len(e) != 1:
+        return None
+    h = e[0].get("Hashes") or {}
+    return {"size": e[0]["Size"], "md5": h.get("md5") or h.get("MD5")}
+
+
 def cmd_push(a):
+    from concurrent.futures import ThreadPoolExecutor
     state, changes = plan()
     results, failed = [], False
     cache = {}
+    todo = []          # (index into results, change, remote path, source file)
     for c in changes:
         m, rel = c["meta"], c["rel"]
         isfile = rel == ""
@@ -275,12 +292,11 @@ def cmd_push(a):
         before = state["trees"][c["lbase"]].get(rel)
         # Conflict check: Drive's copy must still be what we pulled.
         if isfile:
-            rl, _ = remote_listing(m["remote"], os.path.dirname(m["rsub"]) or "")
-            cur = rl.get(os.path.basename(m["rsub"]))
+            cur = remote_stat(m["remote"], m["rsub"])
         else:
             cur = cache[key].get(rel)
         if cur is not None and cur["md5"] == c["md5"]:
-            results.append({"file": rsub, "status": "already-current", "size": c["size"]}); continue
+            results.append({"file": rsub, "status": "already-current", "size": c["size"], "_c": c}); continue
         if before is None and cur is not None:
             results.append({"file": rsub, "status": "conflict", "why": "created on Drive since pull"}); failed = True; continue
         if before is not None and (cur is None or cur["md5"] != before["md5"]):
@@ -288,14 +304,33 @@ def cmd_push(a):
         src = c["lbase"] if isfile else os.path.join(c["lbase"], rel)
         if a.dry_run:
             results.append({"file": rsub, "status": "dry-run", "size": c["size"]}); continue
+        results.append({"file": rsub, "status": "pending", "_c": c})
+        todo.append((len(results) - 1, c, rsub, src))
+
+    def work(item):
+        i, c, rsub, src = item
+        m = c["meta"]
         p = rc(["copyto", src, m["remote"] + rsub], check=False)
         if p.returncode != 0:
-            results.append({"file": rsub, "status": "failed", "detail": p.stderr.strip()[-200:]}); failed = True; continue
-        rl, _ = remote_listing(m["remote"], os.path.dirname(rsub))
-        got = rl.get(os.path.basename(rsub))
+            return i, {"file": rsub, "status": "failed", "detail": p.stderr.strip()[-200:]}
+        got = remote_stat(m["remote"], rsub)
         if not got or got["size"] != c["size"]:
-            results.append({"file": rsub, "status": "readback-failed", "want": c["size"], "got": got and got["size"]}); failed = True; continue
-        results.append({"file": rsub, "status": "pushed", "size": c["size"]})
+            return i, {"file": rsub, "status": "readback-failed", "want": c["size"], "got": got and got["size"]}
+        return i, {"file": rsub, "status": "pushed", "size": c["size"], "_c": c}
+
+    # Corpus files first, run records and run state last (a run that dies mid-push must not look finished);
+    # within each group the copies run a few at a time.
+    for group in (lambda c: not c["meta"]["label"].startswith("config:"), lambda c: c["meta"]["label"].startswith("config:")):
+        items = [t for t in todo if group(t[1])]
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for i, r in ex.map(work, items):
+                results[i] = r
+        if any(r["status"] in ("failed", "readback-failed") for r in results):
+            failed = True
+            break      # never send the run records when a corpus file did not arrive
+    for r in results:
+        if r["status"] == "pending":
+            r["status"] = "not-attempted"; failed = True
     # A pending sync the scanner applied was moved into archive/pending-applied locally. Copy never
     # deletes, so the original would stay in the KB root and be applied again by the next scanner.
     # Send the move: only once the archive copy is on Drive, and only if the root copy is still
@@ -311,13 +346,26 @@ def cmd_push(a):
         root_rl, _ = remote_listing(m["remote"], m["rsub"])
         cur = root_rl.get(rel)
         if cur is None:
-            results.append({"file": rroot, "status": "move-already-done"}); continue
+            results.append({"file": rroot, "status": "move-already-done"}); mv["_done"] = True; continue
         if not ar or ar["md5"] != mv["md5"] or cur["md5"] != mv["md5"]:
             results.append({"file": rroot, "status": "move-skipped", "why": "archive copy missing or root copy changed"}); failed = True; continue
         p = rc(["deletefile", "--drive-use-trash=true", m["remote"] + rroot], check=False)
         if p.returncode != 0:
             results.append({"file": rroot, "status": "move-failed", "detail": p.stderr.strip()[-200:]}); failed = True; continue
-        results.append({"file": rroot, "status": "moved-to-archive"})
+        results.append({"file": rroot, "status": "moved-to-archive"}); mv["_done"] = True
+    # Record what is now on Drive, so `status` after a push shows nothing left to send.
+    if not a.dry_run:
+        for r in results:
+            c = r.get("_c")
+            if c and r["status"] in ("pushed", "already-current"):
+                state["trees"][c["lbase"]][c["rel"]] = {"size": c["size"], "md5": c["md5"]}
+        for mv in state.get("moves", []):
+            if mv.get("_done"):
+                state["trees"][mv["lbase"]].pop(mv["rel"], None)
+        snap = {k: v for k, v in state.items() if k in ("trees", "meta")}
+        json.dump(snap, open(os.path.join(root(), SNAP), "w"), indent=1)
+    for r in results:
+        r.pop("_c", None)
     print(json.dumps({"ok": not failed, "results": results}, indent=1))
     return 3 if failed else 0
 
