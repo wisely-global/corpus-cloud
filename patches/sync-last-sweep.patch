@@ -1,0 +1,53 @@
+--- /tmp/claude-1001/-work/f7bd314b-1a0d-5a20-acf4-d7a12df492e1/scratchpad/sync.py.orig	2026-11-24 15:05:25.669961135 +1300
++++ scripts/sync.py	2026-11-24 15:05:34.418593463 +1300
+@@ -201,6 +201,23 @@
+     return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+ 
+ 
++def norm_last_sweep(man: dict) -> dict:
++    """last_sweep is a map of member to ISO time. An older manifest shape stores one bare
++    ISO string (or a list); read it as {"legacy": TIME} and write the map back, so the
++    old shape converts the first time a sweep touches the manifest."""
++    ls = man.get("last_sweep")
++    if isinstance(ls, dict):
++        return ls
++    if isinstance(ls, str) and ls.strip():
++        ls = {"legacy": ls.strip()}
++    elif isinstance(ls, (list, tuple)):
++        ls = {"legacy-%d" % i: v for i, v in enumerate(ls) if isinstance(v, str) and v.strip()}
++    else:
++        ls = {}
++    man["last_sweep"] = ls
++    return ls
++
++
+ def merge_rows(manifest: dict, rows: list) -> dict:
+     """Merge validated rows into a manifest dict. Sources are append-only: a
+     known id or fingerprint is updated or gains a sighting, never replaced."""
+@@ -386,7 +403,7 @@
+     fw = re.search(r"Freshness window:\s*(\d+)\s*days?", nowmd)
+     window = int(fw.group(1)) if fw else 3
+     man = read_json(kbp(a.kb, "source-manifest.json")) or {}
+-    sweeps = [v for v in (man.get("last_sweep") or {}).values() if v]
++    sweeps = [v for v in norm_last_sweep(man).values() if v]
+     last = max(sweeps) if sweeps else None
+     age = None
+     if last:
+@@ -619,7 +636,7 @@
+         m = merge_rows(man, rows) if rows else {"added": 0, "updated": 0, "sightings": 0}
+         man["last_activity"] = max(man.get("last_activity") or "", date) if (rows or kind == "sweep") else man.get("last_activity")
+         if kind == "sweep":
+-            man.setdefault("last_sweep", {})[member] = U.iso(now)
++            norm_last_sweep(man)[member] = U.iso(now)
+         if new_cs is not None:
+             man["corpus_version"] = version_of(new_cs)[0]
+         if delta.get("accounts_item_id"):
+@@ -924,7 +941,7 @@
+     fw = re.search(r"Freshness window:\s*(\d+)\s*days?", nowmd)
+     window = int(fw.group(1)) if fw else 3
+     man = read_json(kbp(kb, "source-manifest.json")) or {}
+-    sweeps = [v for v in (man.get("last_sweep") or {}).values() if v]
++    sweeps = [v for v in norm_last_sweep(man).values() if v]
+     last = max(sweeps) if sweeps else None
+     age = max(0.0, (now - U.parse_time(last)).total_seconds() / 86400.0) if last else None
+     return {"window_days": window, "last_sweep": last, "age_days": None if age is None else round(age, 2),
