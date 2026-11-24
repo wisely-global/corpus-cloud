@@ -68,4 +68,7 @@ echo "shadow now" > "$SH/now.md"; $S push >/dev/null
 chk "shadow file pushed" "grep -q 'shadow now' '$T/drive-clients/Acme/Claude Project Knowledge Base (shadow)/now.md'"
 # duplicate titles on Drive -> pull refuses that client
 cp "$T/drive-clients/Beta/Claude Project Knowledge Base" /dev/null 2>&1
+# no rclone config at all must be an error, never an empty Drive
+: > "$T/empty.conf"; RCLONE_CONFIG="$T/empty.conf" STAGE_ROOT="$T/mount-none" $S pull --fresh > "$T/o6"; rc6=$?
+chk "missing rclone config fails the pull" "[ $rc6 -eq 3 ] && grep -q 'not configured' $T/o6"
 echo "== $([ $fail -eq 0 ] && echo ALL PASS || echo FAILURES)"; rm -rf "$T"; exit $fail
