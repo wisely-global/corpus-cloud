@@ -784,7 +784,7 @@ def cmd_finish(a):
             pj = json.loads(p.stdout)
         except Exception:  # noqa: BLE001
             pj = {"ok": False, "error": (p.stdout + p.stderr)[-500:]}
-        bad = [r for r in pj.get("results", []) if r["status"] not in ("pushed", "already-current")]
+        bad = [r for r in pj.get("results", []) if r["status"] not in ("pushed", "already-current", "moved-to-archive", "move-already-done")]
         res["push"] = {"ok": pj.get("ok"), "pushed": sum(r["status"] == "pushed" for r in pj.get("results", [])), "problems": bad or pj.get("error")}
         if not pj.get("ok"):
             res["ok"] = False
