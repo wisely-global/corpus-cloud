@@ -20,7 +20,7 @@ fi
 # Drive remotes: use what the environment provides. Only build the config here if the key arrives as env vars.
 if ! rclone listremotes 2>/dev/null | grep -q '^clients:$' || ! rclone listremotes 2>/dev/null | grep -q '^ops:$'; then
   if [ -n "${GDRIVE_SA_JSON:-}" ] && [ -n "${CLIENTS_DRIVE_ID:-}" ] && [ -n "${OPS_DRIVE_ID:-}" ]; then
-    python3 "$(dirname "$0")/corpus_stage.py" setup >/dev/null || fail "corpus_stage setup failed"
+    out=$(python3 "$(dirname "$0")/corpus_stage.py" setup 2>&1) || fail "Drive setup failed (key or drive ids wrong, or no internet access to googleapis.com): $(printf %s "$out" | tail -c 300)"
   else
     fail "rclone remotes clients: and ops: are not configured, and no GDRIVE_SA_JSON/CLIENTS_DRIVE_ID/OPS_DRIVE_ID provided"
   fi
