@@ -5,6 +5,7 @@
       "Bash(python3 *corpus-cloud/corpus_run.py:*)",
       "Bash(python3 *corpus-cloud/corpus_stage.py:*)",
       "Bash(bash *corpus-cloud/container-setup.sh:*)",
+      "Bash(python3 *corpus-cloud/slack_notify.py:*)",
       "Bash(python3 *scripts/unattended.py:*)",
       "Bash(python3 *scripts/sync.py:*)",
       "Bash(python3 *scripts/demote.py:*)",
