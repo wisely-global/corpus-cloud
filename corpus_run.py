@@ -145,6 +145,15 @@ def strip_gmail(plan):
     return plan
 
 
+def folder_name(client):
+    """Accept either the Drive folder name or the registry short name for a client (the sessions mixed them up once)."""
+    cands = load("candidates.json", {}) or {}
+    if client in cands:
+        return client
+    inv = {v: k for k, v in (load("shorts.json", {}) or {}).items()}
+    return inv.get(client, client)
+
+
 def short_of(client):
     return (load("shorts.json", {}) or {}).get(client, client)
 
@@ -802,6 +811,8 @@ def main():
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
     p = sp.add_parser("finish"); p.add_argument("--no-push", action="store_true"); p.set_defaults(f=cmd_finish)
     a = ap.parse_args()
+    if getattr(a, "client", None):
+        a.client = folder_name(a.client)
     try:
         a.f(a)
     except (RuntimeError, OSError, KeyError, json.JSONDecodeError) as e:
