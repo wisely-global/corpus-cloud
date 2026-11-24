@@ -1,0 +1,46 @@
+--- /tmp/claude-1001/-work/f7bd314b-1a0d-5a20-acf4-d7a12df492e1/scratchpad/test_sync.py.orig	2026-11-24 15:05:50.886901343 +1300
++++ test_sync.py	2026-11-24 15:05:50.900900754 +1300
+@@ -790,6 +790,43 @@
+         self.assertIn("Current items", rd(kb, "open-items-register.md"))
+         self.assertIn("Send quote", rd(out["undo"], "open-items-register.md"))
+ 
++class LastSweepShapeTests(unittest.TestCase):
++    """An older manifest stores last_sweep as a bare string: read it, convert it on write."""
++
++    def test_string_becomes_map(self):
++        man = {"last_sweep": "2026-11-22T23:30:00Z"}
++        self.assertEqual(sync.norm_last_sweep(man), {"legacy": "2026-11-22T23:30:00Z"})
++        self.assertEqual(man["last_sweep"], {"legacy": "2026-11-22T23:30:00Z"})
++
++    def test_missing_empty_and_list(self):
++        for ls in (None, "", "  ", []):
++            man = {"last_sweep": ls}
++            self.assertEqual(sync.norm_last_sweep(man), {})
++            self.assertEqual(man["last_sweep"], {})
++        man = {}
++        self.assertEqual(sync.norm_last_sweep(man), {})
++        man = {"last_sweep": ["2026-11-01T00:00:00Z", None]}
++        self.assertEqual(sync.norm_last_sweep(man), {"legacy-0": "2026-11-01T00:00:00Z"})
++
++    def test_map_untouched(self):
++        man = {"last_sweep": {"a@x.com": "2026-11-16T10:00:00Z"}}
++        self.assertEqual(sync.norm_last_sweep(man), {"a@x.com": "2026-11-16T10:00:00Z"})
++
++    def test_sweep_close_on_string_manifest(self):
++        with tempfile.TemporaryDirectory() as kb:
++            for f, c in (("now.md", NOW_MD), ("current-state.md", "# CS\nVersion: 3\n")):
++                open(os.path.join(kb, f), "w").write(c)
++            json.dump({"client": "Acme", "sources": [], "last_sweep": "2026-11-01T00:00:00Z"},
++                      open(os.path.join(kb, "source-manifest.json"), "w"))
++            open(os.path.join(kb, "changelog.md"), "w").write("# Changelog\n")
++            delta = {"member": "a@x.com", "kind": "sweep", "summary": "Sweep, nothing new."}
++            res, code = sync.run_close(kb, delta, None, False, NOW)
++            self.assertEqual(code, 0, res)
++            man = json.load(open(os.path.join(kb, "source-manifest.json")))
++            self.assertEqual(man["last_sweep"]["legacy"], "2026-11-01T00:00:00Z")
++            self.assertIn("a@x.com", man["last_sweep"])
++
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
