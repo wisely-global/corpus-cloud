@@ -8,6 +8,7 @@ what changed goes back.
 |---|---|
 | `corpus_stage.py` | `setup`, `pull`, `status`, `push`. Pull copies the folders a run needs and snapshots them. Push sends back only changed or new files, refuses any file that changed on Drive since the pull, never deletes (the one removal is sending an already-applied pending sync's original to the Drive trash after its archive copy is verified), and reads every file back by size. |
 | `corpus_run.py` | The mechanics of a run, as subcommands that print JSON: `begin [--mode changed\|nightly]`, `discover`, `stages-from-board`, `plan`, `apply-pending`, `undo`, `record-swept`, `wrap`, `finish`; nightly adds `maintenance` and `requests`. |
+| `cc-env.sh` | Source it first in every shell command of a run. Finds the repo wherever it is checked out (`/work/corpus-cloud`, `/home/user/corpus-cloud`, `~/corpus-cloud`) and sets `CC`, `PATH`, `STAGE_ROOT` and `GMAIL_SWEEP`. |
 | `container-setup.sh` | Idempotent. Installs rclone (pinned, checksum-verified) if missing and proves both shared drives are readable. Put it in the environment's setup script. |
 | `job-prompt.md` | The hourly scheduled-task prompt (`/sweep changed`). |
 | `job-prompt-nightly.md` | The nightly scheduled-task prompt (`/sweep nightly`). |
@@ -20,11 +21,15 @@ what changed goes back.
 
 ## Where it runs
 
-Check this repo out at `/work/corpus-cloud` in the cloud environment (the prompts assume that path). The run checks the three tool files exist and
-reports an error if they do not.
+A scheduled task (routine) in a cloud environment that has this repo as a source. The prompts find the checkout themselves, so the folder name does not matter.
 
-Needs: Python 3, curl, the `clients:` and `ops:` rclone remotes (Hermes service account, read/write on `Consulting | Clients` and
-`Consulting | Operations`), and the client-corpus skill installed.
+The environment needs:
+- **Secrets / environment variables** (set in the environment, never in the repo): `GDRIVE_SA_JSON` (the Hermes service-account key, JSON), `CLIENTS_DRIVE_ID` (`0AGyf2DLZP-r8Uk9PVA`) and `OPS_DRIVE_ID` (`0AFBBEThGl8jnUk9PVA`). `container-setup.sh` turns them into the `rclone` config and installs `rclone` (pinned, checksum-verified) if it is missing.
+- **Internet access** to `downloads.rclone.org` and `googleapis.com` (and GitHub for the checkout).
+- **Connectors** attached to the task: Google Drive, monday.com, Slack, and Gmail with a send tool (without a send tool the prompts post the alert to the Slack channel instead of emailing).
+- A permission mode that does not prompt; see `permissions.example.json`.
+
+Python 3 and curl are used; the client-corpus skill must be synced into the environment.
 
 ## Rules the tools keep
 
