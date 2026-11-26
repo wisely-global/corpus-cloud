@@ -292,11 +292,24 @@ def update_pending_watch():
     json.dump(w, open(watch_path(), "w"), indent=1)
 
 
+def split_top_folders(top):
+    """({name: id} for client folders with a unique name, {name: [ids]} for names used by more than one folder).
+    Two top-level folders with one name cannot be told apart by name, and a name-keyed map would silently keep
+    the last one, so such a client is left out of the run (and reported) until a person merges or renames them."""
+    by_name = {}
+    for e in top:
+        by_name.setdefault(e["Name"], []).append(e["ID"])
+    return ({n: v[0] for n, v in by_name.items() if len(v) == 1}, {n: v for n, v in by_name.items() if len(v) > 1})
+
+
 def cmd_discover(a):
     s = state()
     since = parse_iso(s["since"])
     top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
-    ids = {e["Name"]: e["ID"] for e in top}
+    ids, dup_folders = split_top_folders(top)
+    for name, fids in sorted(dup_folders.items()):  # never guess which one is the client: skip it and say so
+        record_client(name, "skipped", "duplicate-titles", "drive")
+        event("maintainer-note", "%s: duplicate-titles: %d top-level client folders share this name (%s)" % (name, len(fids), ", ".join(f[:8] for f in fids)))
     # ONE whole-drive file listing straight from the Drive API (not the mount). It yields the files changed
     # since the last run and the pending syncs (client/KB/pending-*.json), which are old files, so no age filter.
     # Corpus subfolders (archive, session-logs, undo...) are not listed at all.
@@ -338,6 +351,7 @@ def cmd_discover(a):
     npend = sum(len(v["pending"]) for v in byc.values())
     event("source", "drive (Drive API listing via rclone): %d files since last run, %d pending syncs" % (len(changes), npend))
     out({"ok": True, "mode": s.get("mode"), "files_changed": len(changes), "since": s["since"], "active_clients_90d": len(activity),
+         "duplicate_folders": dup_folders or None,
          "clients": [{"folder_name": c, "folder_id": ids[c], "changed_files": v["changes"], "pending": v["pending"]} for c, v in sorted(byc.items())],
          "next": "look up each client's stage on the Accounts board (Account Status, Short name), write stages.json {folder_name: {short, stage}}, then run plan"})
 
@@ -761,8 +775,11 @@ ADVICE = {
                   ['/tidy "{c}"   (runs the migration from references/corpus-migration.md)', '/sweep "{c}"']),
     "over-budget": ("current-state.md or now.md is over its size ceiling, so new material cannot be folded in.",
                     ['/tidy "{c}"   (shows what moves where; the nightly run also demotes automatically)', '/sweep "{c}"']),
-    "stage-unknown": ("The Accounts board has no usable Account Status for this client, so it is not swept.",
-                      ['Set Account Status on the client\'s Accounts board item to Client, Past Client or Buying process', '/sweep "{c}"']),
+    "stage-unknown": ("No usable stage was found for this client, so it is not swept. Clients are matched to the Accounts board by the folder id in the item's Client Folder G Drive link, "
+                      "so either Account Status is empty, or that link points at a different folder than the client's Drive folder.",
+                      ["Open the client's Accounts board item: Client Folder G Drive must link to the client's own Drive folder (the one holding Claude Project Knowledge Base)",
+                       "Account Status must be Client, Past Client or Buying process",
+                       '/sweep "{c}"']),
     "needs-question": ("The run reached a point that needed a person's judgement.", ['/tidy "{c}"', '/sweep "{c}"']),
     "no-corpus": ("The client has a Drive folder but no corpus.", ['Ask for a build:  /sweep "{c}"  (offers to create the corpus; never started unattended)']),
     "write-failed": ("A write did not complete; the run restored what it had changed.", ['/tidy "{c}"', '/sweep "{c}"']),
