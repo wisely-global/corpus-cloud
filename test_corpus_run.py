@@ -189,5 +189,46 @@ class DigestResolvedFailures(unittest.TestCase):
         self.assertNotIn("swept since", d["text"])
 
 
+class DuplicateTopFolders(unittest.TestCase):
+    TOP = [{"Name": "Counties Manukau Sport", "ID": "19BG"}, {"Name": "Solo", "ID": "s1"}, {"Name": "Counties Manukau Sport", "ID": "1e9H"}]
+
+    def test_split_keeps_unique_and_reports_duplicates(self):
+        ids, dups = cr.split_top_folders(self.TOP)
+        self.assertEqual(ids, {"Solo": "s1"})
+        self.assertEqual(dups, {"Counties Manukau Sport": ["19BG", "1e9H"]})
+
+    def test_discover_skips_duplicate_named_client_and_records_it(self):
+        import json, subprocess, tempfile
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(cr.runs_dir())
+        json.dump({"run_id": "r", "since": "2026-11-26T12:38:42Z", "mode": "changed"}, open(os.path.join(cr.work(), "run.json"), "w"))
+        listing = [{"Path": "Counties Manukau Sport/x.docx", "ID": "f1", "ModTime": "2026-11-27T01:00:00Z"},
+                   {"Path": "Solo/y.docx", "ID": "f2", "ModTime": "2026-11-27T01:00:00Z"}]
+        def fake_rclone(args):
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.TOP if "--dirs-only" in args else listing), "")
+        recorded, events = [], []
+        with mock.patch.object(cr, "rclone", fake_rclone), \
+             mock.patch.object(cr, "record_client", lambda *a, **k: recorded.append(a)), \
+             mock.patch.object(cr, "event", lambda *a: events.append(a)):
+            try:
+                cr.cmd_discover(None)
+            except SystemExit:
+                pass
+        self.assertEqual(sorted(cr.load("candidates.json")), ["Solo"])    # the ambiguous folder is never a candidate
+        self.assertEqual(recorded, [("Counties Manukau Sport", "skipped", "duplicate-titles", "drive")])
+        self.assertIn("2 top-level client folders", events[0][1])
+
+
+class StageUnknownAdvice(unittest.TestCase):
+    def test_mentions_folder_link_not_only_status(self):
+        meaning, cmds = cr.ADVICE["stage-unknown"]
+        self.assertIn("Client Folder G Drive", meaning)
+        self.assertTrue(any("Client Folder G Drive" in c for c in cmds))
+        self.assertTrue(any("{c}" in c for c in cmds))
+
+
 if __name__ == "__main__":
     unittest.main()
