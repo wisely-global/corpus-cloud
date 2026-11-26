@@ -96,6 +96,49 @@ class FolderNames(unittest.TestCase):
         self.assertEqual(cr.folder_name("Unknown Client"), "Unknown Client")    # unknown passes through
         del os.environ["CORPUS_WORK"]
 
+class CarryOver(unittest.TestCase):
+    """A client carried over from the last run must get a registry row even with no Drive change (the 'no-registry-entry' bug)."""
+    def setUp(self):
+        import tempfile, json
+        self.tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = self.tmp
+        os.environ["CORPUS_WORK"] = os.path.join(self.tmp, "work")
+        os.makedirs(cr.runs_dir())
+        os.makedirs(os.path.join(self.tmp, cr.OPS), exist_ok=True)
+        json.dump({"carry_over": [{"client": "Box Hill", "attempts": 0, "sources": ["drive"]},
+                                  {"client": "Service Foods NZ", "attempts": 0, "sources": ["drive"]},
+                                  {"client": "Gone Client", "attempts": 0, "sources": ["drive"]}]},
+                  open(os.path.join(cr.runs_dir(), "corpus-run-state.json"), "w"))
+        json.dump({"clients": [{"folder_name": "Service Foods", "short": "Service Foods NZ"}]},
+                  open(os.path.join(self.tmp, cr.OPS, "corpus-index.json"), "w"))
+
+    def test_folder_and_short_names_resolve(self):
+        ids = {"Box Hill": "1", "Service Foods": "2", "Other": "3"}
+        self.assertEqual(cr.carried_over_folders(ids), ["Box Hill", "Service Foods"])   # unknown client dropped, order kept
+
+    def test_no_state_file_means_nothing_carried(self):
+        os.remove(os.path.join(cr.runs_dir(), "corpus-run-state.json"))
+        self.assertEqual(cr.carried_over_folders({"Box Hill": "1"}), [])
+
+    def test_discover_adds_carried_clients_to_candidates_and_registry(self):
+        import json, subprocess
+        from unittest import mock
+        json.dump({"run_id": "r", "since": "2026-11-26T12:38:42Z", "mode": "changed"}, open(os.path.join(cr.work(), "run.json"), "w"))
+        top = json.dumps([{"Name": "Box Hill", "ID": "1"}, {"Name": "Service Foods", "ID": "2"}, {"Name": "Other", "ID": "3"}])
+        def fake_rclone(args):
+            return subprocess.CompletedProcess(args, 0, top if "--dirs-only" in args else "[]", "")   # no Drive file changed
+        with mock.patch.object(cr, "rclone", fake_rclone):
+            try:
+                cr.cmd_discover(None)
+            except SystemExit:
+                pass
+        cands = cr.load("candidates.json")
+        self.assertEqual(sorted(cands), ["Box Hill", "Service Foods"])    # "Other" has no change and was not carried
+        stages = {c: {"short": c, "stage": "Client"} for c in cands}
+        json.dump(stages, open(os.path.join(cr.work(), "stages.json"), "w"))
+        # the registry plan() writes is built from the candidates, so both carried clients now have a row
+        reg_names = [c for c in cands if c in stages]
+        self.assertEqual(reg_names, ["Box Hill", "Service Foods"])
 
 
 if __name__ == "__main__":

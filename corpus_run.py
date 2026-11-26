@@ -223,6 +223,28 @@ def nightly_activity(ids, days=90):
         return [x for x in ex.map(one, rows) if x]
 
 
+def carried_over_folders(ids):
+    """Drive folder names of the clients the last completed run carried over (corpus-runs/corpus-run-state.json).
+    A carry-over entry names the client by registry short name or by folder name, so the corpus index maps
+    short names back to folders. Only folders that exist on Drive (`ids`) are returned."""
+    try:
+        co = json.load(open(os.path.join(runs_dir(), "corpus-run-state.json"))).get("carry_over") or []
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = json.load(open(os.path.join(root(), OPS, "corpus-index.json"))).get("clients", [])
+    except Exception:  # noqa: BLE001
+        rows = []
+    by_short = {r["short"]: r["folder_name"] for r in rows if r.get("short") and r.get("folder_name")}
+    found = []
+    for e in co:
+        name = e.get("client") if isinstance(e, dict) else e
+        folder = name if name in ids else by_short.get(name)
+        if folder in ids and folder not in found:
+            found.append(folder)
+    return found
+
+
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -299,6 +321,11 @@ def cmd_discover(a):
         parts = e["Path"].split("/")
         if parts[2].startswith("pending-") and parts[2].endswith(".json") and parts[2] != "pending-failures.json" and parts[0] in ids:
             byc.setdefault(parts[0], {"changes": 0, "pending": []})["pending"].append(parts[2])
+    # Carried-over clients must be candidates too: the registry is built from the candidates only, so a client
+    # carried over from the last run with no new Drive change would otherwise get no registry row and be
+    # dropped as no-registry-entry (and re-carried by the next nightly run, forever).
+    for name in carried_over_folders(ids):
+        byc.setdefault(name, {"changes": 0, "pending": []})
     write_pending_watch(pend, ids)
     activity = []
     if s.get("mode") == "nightly":
