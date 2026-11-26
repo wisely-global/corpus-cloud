@@ -18,7 +18,7 @@ what changed goes back.
 | `permissions.example.json` | Pre-approval list for unattended sessions (allow the run's commands and connector tools, deny anything that deletes or drafts mail). Review before use. |
 | `test_corpus_run.py` | Unit tests for the helpers in `corpus_run.py`. |
 | `test_corpus_stage.sh` | Offline test (two local folders stand in for the shared drives). Run it after any change to `corpus_stage.py`. |
-| `patches/` | Fixes to the installed client-corpus skill that belong in the skill library source (`Chris Skills/Skill Sources/`). |
+| `patches/` | Fixes to the installed client-corpus skill (applied by `apply_skill_patches.py`) that belong in the skill library source (`Chris Skills/Skill Sources/`): `sync-last-sweep`, and `unattended-resolved-failures` (the daily digest no longer lists a failure, or a dropped-after-retries flag, for a client a later run in the same window swept). |
 
 ## Where it runs
 

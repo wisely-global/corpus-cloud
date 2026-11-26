@@ -141,5 +141,53 @@ class CarryOver(unittest.TestCase):
         self.assertEqual(reg_names, ["Box Hill", "Service Foods"])
 
 
+@unittest.skipUnless(cr.skill(), "client-corpus skill not installed")
+class DigestResolvedFailures(unittest.TestCase):
+    """The digest must not list a failure or a dropped-after-retries flag for a client a later run swept."""
+    def digest(self, rows_by_run):
+        import json, shutil, subprocess, tempfile
+        tmp = tempfile.mkdtemp()
+        sk = os.path.join(tmp, "skill")
+        shutil.copytree(cr.skill(), sk)
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "apply_skill_patches.py"), sk],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rd = os.path.join(tmp, "runs")
+        os.makedirs(rd)
+        for i, rows in enumerate(rows_by_run):
+            rec = {"schema": 1, "run_id": "run-2026112%d-0%d00" % (6, i), "mode": "changed", "target": "live", "status": "complete",
+                   "started": "2026-11-26T0%d:00:00Z" % i, "ended": "2026-11-26T0%d:05:00Z" % i, "since": "2026-11-26T00:00:00Z",
+                   "clients": rows, "events": [], "carry_over": [], "totals": {}}
+            open(os.path.join(rd, rec["run_id"] + ".md"), "w").write("# run\n<!-- run-data: %s -->\n" % json.dumps(rec))
+        json.dump({"completed_runs": 3, "failure_totals": {"readback": 0, "manifest-shrank": 0, "over-budget": 0, "misfiled": 0},
+                   "carry_over": []}, open(os.path.join(rd, "corpus-run-state.json"), "w"))
+        p = subprocess.run([sys.executable, os.path.join(sk, "scripts", "unattended.py"), "digest", "--runs-dir", rd,
+                            "--since", "2026-11-26T00:00:00Z", "--until", "2026-11-27T00:00:00Z", "--now", "2026-11-27T01:00:00Z"],
+                           capture_output=True, text=True)
+        return json.loads(p.stdout)
+
+    @staticmethod
+    def row(client, outcome, reason=None, flags=()):
+        return {"client": client, "outcome": outcome, "reason": reason, "flags": list(flags), "failures": [], "files": [], "sources": []}
+
+    def test_failure_then_sweep_is_resolved(self):
+        d = self.digest([[self.row("Atlantic", "failed", "write-failed")],
+                         [self.row("Atlantic", "failed", "write-failed", ["dropped-after-retries"])],
+                         [self.row("Atlantic", "swept")]])
+        self.assertEqual(d["status"], "ok")
+        self.assertNotIn("Failed clients", d["text"])
+        self.assertNotIn("Dropped after three", d["text"])
+        self.assertIn("swept since (nothing to do): Atlantic", d["text"])
+
+    def test_unresolved_failure_still_listed(self):
+        d = self.digest([[self.row("Atlantic", "swept")],
+                         [self.row("Atlantic", "failed", "write-failed", ["dropped-after-retries"]), self.row("Other", "failed", "write-failed")]])
+        self.assertEqual(d["status"], "needs-you")
+        self.assertIn("Atlantic: failed: write-failed", d["text"])
+        self.assertIn("Dropped after three failed attempts", d["text"])
+        self.assertIn("Other: failed", d["text"])
+        self.assertNotIn("swept since", d["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -24,8 +24,8 @@ HELPER = '''def norm_last_sweep(man: dict) -> dict:
 def merge_rows('''
 
 
-def main():
-    p = os.path.join(sys.argv[1], "scripts", "sync.py")
+def patch_sync(skill):
+    p = os.path.join(skill, "scripts", "sync.py")
     s = open(p).read()
     if "def norm_last_sweep" in s:
         print("already applied")
@@ -46,6 +46,50 @@ def main():
     os.replace(p + ".tmp", p)
     print("applied")
     return 0
+
+
+# The daily digest lists every failure in its 24-hour window, even for a client a later run in the same window
+# swept (and "needs you" stays on). Keep a failure or a dropped-after-retries flag only if no later run swept the client.
+UNATT_EDITS = (
+    ("    for _, r in recs:\n        for k, v in run_failures(r).items():",
+     "    swept_at = {}\n    for started_at, r in recs:\n        for k, v in run_failures(r).items():"),
+    ("                swept.add(c)\n",
+     "                swept.add(c)\n                swept_at[c] = started_at\n"),
+    ('                failed.append("%s: failed: %s (%s)" % (c, row.get("reason"), r["run_id"]))',
+     '                failed.append((c, started_at, "%s: failed: %s (%s)" % (c, row.get("reason"), r["run_id"])))'),
+    ('                    dropped.append("%s (%s)" % (c, r["run_id"]))',
+     '                    dropped.append((c, started_at, "%s (%s)" % (c, r["run_id"])))'),
+    ('    carry = [x.get("client") for x in st.get("carry_over", [])]\n    totals = st["failure_totals"]',
+     '    resolved = sorted({c for c, t, _ in failed + dropped if swept_at.get(c, t) > t})\n'
+     '    failed = [x for c, t, x in failed if swept_at.get(c, t) <= t]\n'
+     '    dropped = [x for c, t, x in dropped if swept_at.get(c, t) <= t]\n'
+     '    carry = [x.get("client") for x in st.get("carry_over", [])]\n    totals = st["failure_totals"]'),
+    ('    L.append("")\n    L.append("Run records: corpus-runs/ in Wisely Shared Config.")',
+     '    if resolved:\n        L.append("")\n        L.append("Failed earlier in this window, swept since (nothing to do): %s." % ", ".join(resolved))\n'
+     '    L.append("")\n    L.append("Run records: corpus-runs/ in Wisely Shared Config.")'),
+)
+
+
+def patch_unattended(skill):
+    p = os.path.join(skill, "scripts", "unattended.py")
+    s = open(p).read()
+    if "swept_at = {}" in s:
+        print("already applied")
+        return 0
+    if any(s.count(old) != 1 for old, _ in UNATT_EDITS):
+        print("unattended.py is not the version the patch was written for; not patched", file=sys.stderr)
+        return 3
+    for old, new in UNATT_EDITS:
+        s = s.replace(old, new, 1)
+    ast.parse(s)
+    open(p + ".tmp", "w").write(s)
+    os.replace(p + ".tmp", p)
+    print("applied")
+    return 0
+
+
+def main():
+    return patch_sync(sys.argv[1]) or patch_unattended(sys.argv[1])
 
 
 sys.exit(main())
