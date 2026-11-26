@@ -1,0 +1,51 @@
+--- unattended.py.orig
++++ unattended.py
+@@ -1468,23 +1468,25 @@
+     fails = {k: 0 for k in FAILURE_TYPES}
+     unreachable, review = [], None
+     runs_with_failures = set()
+-    for _, r in recs:
++    swept_at = {}
++    for started_at, r in recs:
+         for k, v in run_failures(r).items():
+             fails[k] += v
+         for row in r.get("clients", []):
+             c, out = row.get("client"), row.get("outcome")
+             if out == "swept":
+                 swept.add(c)
++                swept_at[c] = started_at
+                 updates += 1 if row.get("files") else 0
+             elif out == "skipped":
+                 skipped.setdefault(row.get("reason") or "unknown", set()).add(c)
+             elif out == "failed":
+-                failed.append("%s: failed: %s (%s)" % (c, row.get("reason"), r["run_id"]))
++                failed.append((c, started_at, "%s: failed: %s (%s)" % (c, row.get("reason"), r["run_id"])))
+             if out == "failed" or row.get("failures"):
+                 runs_with_failures.add(r["run_id"])
+             for fl in row.get("flags", []):
+                 if fl == "dropped-after-retries":
+-                    dropped.append("%s (%s)" % (c, r["run_id"]))
++                    dropped.append((c, started_at, "%s (%s)" % (c, r["run_id"])))
+                 else:
+                     flags.append("%s: %s (%s)" % (c, fl, r["run_id"]))
+             if row.get("stale_marker"):
+@@ -1494,6 +1496,9 @@
+                 unreachable.append(e.get("detail"))
+         if r.get("review"):
+             review = r
++    resolved = sorted({c for c, t, _ in failed + dropped if swept_at.get(c, t) > t})
++    failed = [x for c, t, x in failed if swept_at.get(c, t) <= t]
++    dropped = [x for c, t, x in dropped if swept_at.get(c, t) <= t]
+     carry = [x.get("client") for x in st.get("carry_over", [])]
+     totals = st["failure_totals"]
+     need = bool(any(v for k, v in fails.items() if k not in ROUTINE_FAILURES) or failed or dropped or unreachable
+@@ -1532,6 +1537,9 @@
+             L.append("")
+             L.append(title + ":")
+             L += ["- " + x for x in _capped(items)]
++    if resolved:
++        L.append("")
++        L.append("Failed earlier in this window, swept since (nothing to do): %s." % ", ".join(resolved))
+     L.append("")
+     L.append("Run records: corpus-runs/ in Wisely Shared Config.")
+     return {"subject": "Corpus runs, %s: %s" % (day, "needs you" if need else "all clear"),
