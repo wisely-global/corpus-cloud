@@ -117,9 +117,22 @@ def version_of(text):
     return int(m.group(1)) if m else None
 
 
+def version_from_name(name):
+    """A dated current-state file carries its version in its name (`current-state 2026-09-17 v5.md`)."""
+    m = re.search(r" v(\d+)\.md$", name or "")
+    return int(m.group(1)) if m else None
+
+
 # ---------------------------------------------------------------- planning (pure given the listing and a reader)
 def _id8(f):
     return f["id"][:8]
+
+
+def _history_rule(name):
+    for pat, canon, folder in HISTORY:
+        if pat.match(name):
+            return pat, canon, folder
+    return None
 
 
 def plan(client, files, read, today):
@@ -151,6 +164,14 @@ def plan(client, files, read, today):
             handled.update(f["id"] for f in grp)
             continue
         grp.sort(key=lambda f: (f.get("created") or "", f["id"]))
+        hist = _history_rule(grp[0]["name"]) if not grp[0]["dir"] else None
+        if hist and (hist[1] is None or any(g["path"] == hist[1] and g["id"] not in handled for g in files)) \
+                and len({g.get("md5") for g in grp}) > 1:
+            # Superseded history with two different copies: neither is the live file, so there is nothing to choose.
+            # Both are kept side by side in the archive, each in a folder named for its id.
+            for g in grp:
+                move(g, "%s/%s/%s" % (kb, hist[2], _id8(g)), "two different copies of dated history; both kept, neither is live")
+            continue
         keep = grp[0]
         for other in grp[1:]:
             if keep.get("md5") and keep.get("md5") == other.get("md5"):
@@ -188,7 +209,10 @@ def plan(client, files, read, today):
                               "question": "%s is dated history but %s is not in the KB root, so it was left in place. Where is the live file?" % (f["name"], canon)})
             elif canon == "current-state.md":
                 try:
-                    vc, vh = version_of(read(live[canon])), version_of(read(f))
+                    vc = version_of(read(live[canon]))
+                    vh = version_of(read(f))
+                    if vh is None:
+                        vh = version_from_name(f["name"])
                 except Exception:  # noqa: BLE001
                     vc = vh = None
                 if vc is None or vh is None or vc < vh:
