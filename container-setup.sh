@@ -4,14 +4,11 @@
 # missing (pinned version, checksum verified) and checks the Drive remotes work. It never prints secrets.
 # Exit 0: ready. Exit 3: not ready, with the reason on stderr (the run treats that as an error).
 set -u
-V="${RCLONE_VERSION:-v1.76.0}"   # R tidy moves files by id: `backend moveid` needs v1.70.0 or newer
+V="${RCLONE_VERSION:-v1.76.0}"
 BIN="$HOME/.local/bin"; mkdir -p "$BIN"; export PATH="$BIN:$PATH"
 fail() { echo "container-setup: $*" >&2; exit 3; }
 
-has_moveid() { rclone backend help drive 2>/dev/null | grep -q "moveid"; }
-# Install when rclone is missing, or present but too old for `backend moveid` (an older build on PATH would
-# otherwise pass setup and then fail every R tidy).
-if ! command -v rclone >/dev/null 2>&1 || ! has_moveid; then
+if ! command -v rclone >/dev/null 2>&1; then
   T=$(mktemp -d); Z="rclone-$V-linux-amd64.zip"
   curl -fsS -m 120 -o "$T/$Z" "https://downloads.rclone.org/$V/$Z" || fail "rclone download failed"
   curl -fsS -m 60 -o "$T/SHA256SUMS" "https://downloads.rclone.org/$V/SHA256SUMS" || fail "rclone checksum list download failed"
@@ -19,8 +16,6 @@ if ! command -v rclone >/dev/null 2>&1 || ! has_moveid; then
   python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$T/$Z" "$T" || fail "rclone unzip failed"
   cp "$T/rclone-$V-linux-amd64/rclone" "$BIN/rclone" && chmod +x "$BIN/rclone" || fail "rclone install failed"
 fi
-
-has_moveid || fail "rclone $(rclone version 2>/dev/null | head -1) has no drive 'moveid' command: R tidy needs v1.70.0 or newer"
 
 # Drive remotes: use what the environment provides. Only build the config here if the key arrives as env vars.
 if ! rclone listremotes 2>/dev/null | grep -q '^clients:$' || ! rclone listremotes 2>/dev/null | grep -q '^ops:$'; then

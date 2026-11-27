@@ -370,7 +370,7 @@ class TidyWiring(unittest.TestCase):
         import tempfile
         os.environ["CORPUS_WORK"] = tempfile.mkdtemp()
         cr.save("run.json", {"run_id": "r"})                      # a run is active, so the run record is written
-        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc: None), \
+        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc, **k: None), \
              mock.patch.object(cr, "event", lambda k, d: events.append(d)), \
              mock.patch.object(cr, "record_client", lambda *a, **k: recorded.append(a)), \
              mock.patch.object(cr, "short_of", lambda c: "A"):
@@ -389,7 +389,7 @@ class TidyWiring(unittest.TestCase):
         os.environ["CORPUS_WORK"] = tempfile.mkdtemp()           # no run.json here
         rep = {"client": "A", "files_seen": 1, "planned": 1, "ops": [], "applied": True, "attempted": True, "moved": 1, "written": 0, "deferred": 0, "problems": [], "flags": []}
         buf = io.StringIO()
-        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc: None), \
+        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc, **k: None), \
              mock.patch.object(cr, "short_of", lambda c: "A"), contextlib.redirect_stdout(buf):
             try:
                 cr.cmd_tidy(argparse.Namespace(client="A", apply=True, cap=40, today="2026-11-28"))
@@ -406,7 +406,7 @@ class TidyWiring(unittest.TestCase):
         import corpus_tidy as ct
         rep = {"client": "A", "files_seen": 1, "planned": 1, "ops": [], "applied": False, "attempted": False, "flags": [{"path": "x", "kind": "conflict", "question": "q"}]}
         events, recorded = [], []
-        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc: None), \
+        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc, **k: None), \
              mock.patch.object(cr, "event", lambda k, d: events.append(d)), \
              mock.patch.object(cr, "record_client", lambda *a, **k: recorded.append(a)), \
              mock.patch.object(cr, "short_of", lambda c: "A"):
