@@ -224,6 +224,76 @@ class DuplicateTopFolders(unittest.TestCase):
         self.assertIn("2 top-level client folders", events[0][1])
 
 
+class EndedSessionMarkers(unittest.TestCase):
+    """A session that files a pending sync leaves its open-*.md marker for apply-pending to close. The run's
+    open-session skip must not hold such a client back, or the pending sync that closes the marker never runs."""
+    MARKER = "open-20261127-0942-owenb.md"
+
+    def setUp(self):
+        import tempfile
+        self.kb = tempfile.mkdtemp()
+
+    def pend(self, name, part=1, parts=1, marker=MARKER, closed_at="2026-11-26T20:43:46Z"):
+        import json
+        delta = {"member": "owen.b@wiselyglobal.tech", "date": "2026-11-27"}
+        if part == 1:  # the light keys travel in part 1
+            if marker:
+                delta["marker"] = marker
+            if closed_at:
+                delta["closed_at"] = closed_at
+        with open(os.path.join(self.kb, name), "w") as fh:
+            json.dump({"pending": 2, "id": cr._pend_id(name), "part": part, "parts": parts, "delta": delta}, fh)
+
+    def test_complete_single_part_names_its_marker(self):
+        self.pend("pending-2026-11-27-owenb-0943.json")
+        self.assertEqual(cr.ended_session_markers(self.kb), {self.MARKER})
+
+    def test_complete_multi_part_names_its_marker(self):
+        self.pend("pending-2026-11-27-owenb-0943-p1.json", 1, 2)
+        self.pend("pending-2026-11-27-owenb-0943-p2.json", 2, 2)
+        self.assertEqual(cr.ended_session_markers(self.kb), {self.MARKER})
+
+    def test_missing_part_keeps_the_marker_open(self):
+        self.pend("pending-2026-11-27-owenb-0943-p1.json", 1, 2)   # part 2 not uploaded yet
+        self.assertEqual(cr.ended_session_markers(self.kb), set())
+
+    def test_no_marker_or_no_closed_at_names_nothing(self):
+        self.pend("pending-2026-11-27-owenb-1003.json", marker=None)
+        self.pend("pending-2026-11-27-owenb-1100.json", closed_at=None)
+        self.assertEqual(cr.ended_session_markers(self.kb), set())
+
+    def test_failures_file_and_garbage_are_ignored(self):
+        open(os.path.join(self.kb, "pending-failures.json"), "w").write("{}")
+        open(os.path.join(self.kb, "pending-2026-11-27-x-1.json"), "w").write("not json")
+        self.assertEqual(cr.ended_session_markers(self.kb), set())
+        self.assertEqual(cr.ended_session_markers(os.path.join(self.kb, "missing")), set())
+
+    def open_marker(self, *lines, undated=()):
+        return {"skip": True, "reason": "session-open", "undated": list(undated),
+                "open": [{"date": "2026-11-27", "time": "09:42", "age_hours": 10.0, "line": ln} for ln in lines]}
+
+    def test_no_skip_stays_no_skip(self):
+        self.assertFalse(cr.session_still_open({"skip": False, "open": [], "undated": []}, set()))
+
+    def test_marker_awaiting_its_pending_sync_does_not_hold_the_client(self):
+        self.assertFalse(cr.session_still_open(self.open_marker(self.MARKER), {self.MARKER}))
+
+    def test_live_session_still_skips(self):
+        self.assertTrue(cr.session_still_open(self.open_marker(self.MARKER), set()))
+        self.assertTrue(cr.session_still_open(self.open_marker(self.MARKER, "open-20261127-1321-owenb.md"), {self.MARKER}))
+
+    def test_changelog_or_unreadable_markers_still_skip(self):
+        legacy = "opened 2026-11-27 09:42 - owen.b@wiselyglobal.tech"   # an in-changelog marker is not a file name
+        self.assertTrue(cr.session_still_open(self.open_marker(legacy), {self.MARKER}))
+        self.assertTrue(cr.session_still_open(self.open_marker(self.MARKER, undated=["open-bad.md"]), {self.MARKER}))
+
+    def test_plan_uses_the_ended_marker_check(self):
+        import inspect
+        src = inspect.getsource(cr.cmd_plan)
+        self.assertIn("session_still_open(om, ended_session_markers(kb))", src)
+        self.assertNotIn('if om.get("skip"):', src)
+
+
 class StageUnknownAdvice(unittest.TestCase):
     def test_mentions_folder_link_not_only_status(self):
         meaning, cmds = cr.ADVICE["stage-unknown"]

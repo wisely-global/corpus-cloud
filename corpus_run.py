@@ -429,7 +429,7 @@ def cmd_plan(a):
                 entry.update(status="skipped", reason=pf.get("reason"))
             else:
                 _, om = jpy("unattended.py", ["open-marker", "--changelog", os.path.join(kb, "changelog.md"), "--markers-dir", os.path.join(kb, "session-logs")])
-                if om.get("skip"):
+                if session_still_open(om, ended_session_markers(kb)):
                     record_client(short, "skipped", "session-open", "drive")
                     entry.update(status="skipped", reason="session-open")
                 else:
@@ -467,6 +467,43 @@ def _pend_id(fname):
     """pending-2026-11-17-aayushb-1630-p1.json -> 2026-11-17-aayushb-1630 (a multi-part sync is one id)."""
     import re
     return re.sub(r"-p\d+$", "", fname[len("pending-"):-len(".json")])
+
+
+def ended_session_markers(kb):
+    """Names of open-*.md markers whose session has ended: a complete pending sync (every part present, closed_at
+    set) names the marker, and applying it is what closes the marker. A user session that files a pending sync leaves
+    its marker open, so without this the open-session skip would hold the client back for 24 hours and the pending
+    sync that closes the marker would never run."""
+    groups = {}
+    for fn in sorted(os.listdir(kb)) if os.path.isdir(kb) else []:
+        if not (fn.startswith("pending-") and fn.endswith(".json")) or fn == "pending-failures.json":
+            continue
+        try:
+            env = json.load(open(os.path.join(kb, fn), encoding="utf-8"))
+            part, parts, delta = int(env["part"]), int(env["parts"]), env["delta"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # unreadable or a different shape: leave it to apply-pending, and keep the skip
+        g = groups.setdefault(_pend_id(fn), {"parts": parts, "have": set(), "delta": None})
+        g["have"].add(part)
+        if part == 1:
+            g["delta"] = delta  # the light keys, marker and closed_at, travel in part 1
+    ended = set()
+    for g in groups.values():
+        d = g["delta"] or {}
+        if g["have"] == set(range(1, g["parts"] + 1)) and d.get("marker") and d.get("closed_at"):
+            ended.add(os.path.basename(d["marker"]))
+    return ended
+
+
+def session_still_open(om, ended):
+    """The skill's open-marker result says skip, but a marker that a complete pending sync is waiting to close is not
+    a live session. Anything else keeps the skip: an in-changelog marker, a marker with no readable time, or a
+    marker no complete pending sync names."""
+    if not om.get("skip"):
+        return False
+    if om.get("undated"):
+        return True
+    return any(m.get("line") not in ended for m in om.get("open", []))
 
 
 def cmd_apply(a):

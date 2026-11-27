@@ -40,6 +40,7 @@ Python 3 and curl are used; the client-corpus skill must be synced into the envi
 - The Drive listing in `discover` is an approved replacement (owner, 24 Nov 2026) for the connector search in `unattended.md` step 2.
   The connector route stays as the fallback.
 - Clients whose corpus folder has same-named files on Drive are never staged; the run records `duplicate-titles` and the nightly run (or `/tidy`) fixes them.
+- An open-session marker does not hold a client back when a complete pending sync (all parts present, `closed_at` set) names that marker: the session has ended, and applying the pending sync is what closes the marker. `plan` checks this itself (`ended_session_markers`) because the skill's `open-marker` check runs before `apply-pending` and would otherwise skip the client for 24 hours. A marker no pending sync names, an in-changelog marker and one with no readable time still skip.
 
 ## Settings
 
