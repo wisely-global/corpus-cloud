@@ -310,13 +310,26 @@ def cmd_push(a):
     def work(item):
         i, c, rsub, src = item
         m = c["meta"]
-        p = rc(["copyto", src, m["remote"] + rsub], check=False)
-        if p.returncode != 0:
-            return i, {"file": rsub, "status": "failed", "detail": p.stderr.strip()[-200:]}
-        got = remote_stat(m["remote"], rsub)
-        if not got or got["size"] != c["size"]:
-            return i, {"file": rsub, "status": "readback-failed", "want": c["size"], "got": got and got["size"]}
-        return i, {"file": rsub, "status": "pushed", "size": c["size"], "_c": c}
+        # Drive can answer a listing for a file it has only just accepted with nothing (or an old size), so a
+        # failed read-back is retried with a pause, and the copy is repeated if it still has not appeared.
+        # Copy-then-verify is idempotent. Every attempt must still end in a size match to count as pushed.
+        import time
+        last_err, got = "", None
+        for attempt in range(4):
+            if attempt:
+                time.sleep(2 * attempt)
+            p = rc(["copyto", src, m["remote"] + rsub], check=False)
+            if p.returncode != 0:
+                last_err = p.stderr.strip()[-200:]
+                continue
+            for look in range(3):
+                got = remote_stat(m["remote"], rsub)
+                if got and got["size"] == c["size"]:
+                    return i, {"file": rsub, "status": "pushed", "size": c["size"], "_c": c}
+                time.sleep(1 + look)
+        if last_err and not got:
+            return i, {"file": rsub, "status": "failed", "detail": last_err}
+        return i, {"file": rsub, "status": "readback-failed", "want": c["size"], "got": got and got["size"]}
 
     # Corpus files first, run records and run state last (a run that dies mid-push must not look finished);
     # within each group the copies run a few at a time.

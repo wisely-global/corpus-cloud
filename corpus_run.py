@@ -307,9 +307,6 @@ def cmd_discover(a):
     since = parse_iso(s["since"])
     top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
     ids, dup_folders = split_top_folders(top)
-    for name, fids in sorted(dup_folders.items()):  # never guess which one is the client: skip it and say so
-        record_client(name, "skipped", "duplicate-titles", "drive")
-        event("maintainer-note", "%s: duplicate-titles: %d top-level client folders share this name (%s)" % (name, len(fids), ", ".join(f[:8] for f in fids)))
     # ONE whole-drive file listing straight from the Drive API (not the mount). It yields the files changed
     # since the last run and the pending syncs (client/KB/pending-*.json), which are old files, so no age filter.
     # Corpus subfolders (archive, session-logs, undo...) are not listed at all.
@@ -334,6 +331,18 @@ def cmd_discover(a):
         parts = e["Path"].split("/")
         if parts[2].startswith("pending-") and parts[2].endswith(".json") and parts[2] != "pending-failures.json" and parts[0] in ids:
             byc.setdefault(parts[0], {"changes": 0, "pending": []})["pending"].append(parts[2])
+    # Never guess which of two same-named folders is the client. Say so only when work is actually blocked
+    # (a changed file since the last run or a pending sync under that name); an idle duplicate, such as an empty
+    # template shell from a double create, is a maintainer note, not an error the hourly run re-raises every hour.
+    for name, fids in sorted(dup_folders.items()):
+        blocked = any(e["Path"].split("/")[0] == name and len(e["Path"].split("/")) > 1 and parse_iso(e["ModTime"]) > since for e in changed) \
+            or any(e["Path"].split("/")[0] == name and e["Path"].split("/")[2].startswith("pending-") for e in pend)
+        note = "%s: duplicate-titles: %d top-level client folders share this name (%s)" % (name, len(fids), ", ".join(f[:8] for f in fids))
+        if blocked:
+            record_client(name, "skipped", "duplicate-titles", "drive")
+            event("maintainer-note", note)
+        else:
+            event("maintainer-note", note + " (idle: no changed files or pending syncs, so nothing is blocked)")
     # Carried-over clients must be candidates too: the registry is built from the candidates only, so a client
     # carried over from the last run with no new Drive change would otherwise get no registry row and be
     # dropped as no-registry-entry (and re-carried by the next nightly run, forever).
@@ -926,7 +935,11 @@ def cmd_finish(a):
     s = state()
     rc, d = jpy("unattended.py", ["record", "finish", "--runs-dir", runs_dir(), "--run-id", s["run_id"], "--plan", os.path.join(work(), "plan.json")])
     if rc != 0:
-        out({"ok": False, "error": "record finish failed", "detail": d}, 3)
+        # A second finish after a failed push must still be able to push: the record is already closed locally and
+        # the push is idempotent (files already on Drive read as already-current). Any other failure stays an error.
+        if "already" not in json.dumps(d).lower() or a.no_push:
+            out({"ok": False, "error": "record finish failed", "detail": d}, 3)
+        d = {}
     jpy("unattended.py", ["tidy-queue", "--runs-dir", runs_dir()])
     update_pending_watch()
     res = {"ok": True, "reply": d.get("reply")}

@@ -302,5 +302,31 @@ class StageUnknownAdvice(unittest.TestCase):
         self.assertTrue(any("{c}" in c for c in cmds))
 
 
+class IdleDuplicateFolder(unittest.TestCase):
+    def test_idle_duplicate_is_a_note_not_a_skip(self):
+        import json, subprocess, tempfile
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(cr.runs_dir())
+        json.dump({"run_id": "r", "since": "2026-11-26T12:38:42Z", "mode": "changed"}, open(os.path.join(cr.work(), "run.json"), "w"))
+        top = [{"Name": "Tegel Foods Ltd", "ID": "a1"}, {"Name": "Tegel Foods Ltd", "ID": "b2"}, {"Name": "Solo", "ID": "s1"}]
+        listing = [{"Path": "Solo/y.docx", "ID": "f2", "ModTime": "2026-11-27T01:00:00Z"},
+                   {"Path": "Tegel Foods Ltd/old.docx", "ID": "f3", "ModTime": "2026-01-01T00:00:00Z"}]
+        def fake_rclone(args):
+            return subprocess.CompletedProcess(args, 0, json.dumps(top if "--dirs-only" in args else listing), "")
+        recorded, events = [], []
+        with mock.patch.object(cr, "rclone", fake_rclone), \
+             mock.patch.object(cr, "record_client", lambda *a, **k: recorded.append(a)), \
+             mock.patch.object(cr, "event", lambda *a: events.append(a)):
+            try:
+                cr.cmd_discover(None)
+            except SystemExit:
+                pass
+        self.assertEqual(recorded, [])
+        self.assertIn("idle", events[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()
