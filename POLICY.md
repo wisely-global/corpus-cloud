@@ -121,8 +121,8 @@ status), that is a missing fact and goes to a person, with the steps above.
 
 | Built | Not yet built |
 |---|---|
-| `R tidy`: native Google files, same-path duplicates (identical, superset, clean JSON merge), dated history | Choosing between two top-level client folders of one name by the board's folder link (needs staging by folder id instead of by name); today it is a conflict card |
-| Conflict cards: duplicate Accounts items, duplicate top-level folders, unknown Account Status | Merging the contents of two Accounts items or two folders (a person does it, from the card's steps) |
+| `R tidy`: native Google files, same-path duplicates (identical, superset, clean JSON merge), dated history | Staging by folder id (so a client with two same-name folders could be swept before the merge) |
+| `R merge-folders`: two same-name top-level folders where the board links exactly one: contents move into the linked folder, the emptied twin is archived inside it, clashing files are left and named on the card. Conflict cards: duplicate Accounts items, duplicate folders the board cannot decide, unknown Account Status | Merging the contents of two Accounts items (a person does it, from the card's steps) |
 | `R promote`: shadow corpus goes live by atomic rename after the checks and the board identity check | Verified end to end on a real build (the first one is OneNZ) |
 | Live check in `R maintenance`: a queue row whose problem is gone is reported as already resolved. `R queue-reconcile` (nightly) closes every open queue row whose problem the live folder no longer shows, resolving the client by registry name, alias or a unique name prefix | Queue rows for names no source knows ('CMS', 'Mushroom CH') stay open, listed with the reason |
 | Stale queue rows for a failure list with nothing pending; re-runnable `finish`; retried read-back on push | Pointer repair when a file a manifest row names has moved |
