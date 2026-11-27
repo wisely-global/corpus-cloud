@@ -709,8 +709,15 @@ def build_conflict_cards(raw_items):
             pass          # a card without folder counts is still a card
     by_folder = {i["folder_id"]: i for i in items if i["folder_id"]}
     cards = [cc.card_duplicate_accounts(g, facts, created) for g in dups]
+    md = load("merge_details.json", {}) or {}
     cards += [cc.card_duplicate_folders(n, [{"id": f, "created": created.get(f), "facts": facts.get(f)} for f in ids], by_folder)
               for n, ids in sorted(dup_folders.items())]
+    for c in cards:
+        d = md.get(c.get("client")) if c["kind"] == "duplicate-folders" else None
+        if d and d.get("conflicts"):
+            c["facts"].append("Automatic merge: %d item(s) were moved into the board-linked folder. These %d file(s) exist in both folders with different content, so they were left in the other folder for a person to choose: %s%s" % (
+                d.get("moved", 0), len(d["conflicts"]), "; ".join(d["conflicts"][:8]), " and %d more" % (len(d["conflicts"]) - 8) if len(d["conflicts"]) > 8 else ""))
+            c["blocks"].append("Nothing else is blocked by the merge: everything without a clash has already been moved.")
     cards += [cc.card_unknown_status(label, its) for label, its in sorted(unknown.items())]
     cards = cc.merge_first_seen(conflict_cards(), cards, _nz_today())
     os.makedirs(runs_dir(), exist_ok=True)
@@ -1030,6 +1037,119 @@ def cmd_seed_client_ids(a):
     save("seed_plan.json", plan)
     out({"ok": True, "assign": plan, "column": "text_mm8pgmx8 (Client ID)",
          "next": "write each client_id to its item with change_item_column_values (only that column), read the echo back, then run `R seed-client-ids --commit ITEM_ID...` for the ones that matched"})
+
+
+MERGE_CAP = 300          # files moved per pair per night
+
+
+def plan_folder_merge(linked_root, other_root, linked_entries, other_entries):
+    """Merge a twin folder into the folder the board links, using only what a person would do by hand: move what the linked
+    folder lacks, keep what it already has. Entries are `rclone lsjson -R` rows (Path, ID, IsDir, Size, Hashes).
+    Returns {moves, identical, conflicts}. A file at the same path with the same content is `identical` (nothing to move: the
+    twin keeps it when it is archived). Same path with different content, or a folder against a file, is a `conflict`
+    (left where it is, named for a person). Moving a folder moves everything inside it, so nothing under it is listed."""
+    def key(e):
+        return e["Path"]
+    L = {key(e): e for e in linked_entries}
+    lid = {"": linked_root}
+    lid.update({key(e): e["ID"] for e in linked_entries if e.get("IsDir")})
+    oid = {"": other_root}
+    oid.update({key(e): e["ID"] for e in other_entries if e.get("IsDir")})
+    moves, identical, conflicts, moved_dirs = [], [], [], []
+    for e in sorted(other_entries, key=lambda x: (x["Path"].count("/"), x["Path"])):
+        path = key(e)
+        if any(path.startswith(d + "/") for d in moved_dirs):
+            continue
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        if parent in moved_dirs or parent not in lid:
+            continue
+        mine = L.get(path)
+        if mine is None:
+            moves.append({"path": path, "id": e["ID"], "is_dir": bool(e.get("IsDir")), "from": oid[parent], "to": lid[parent]})
+            if e.get("IsDir"):
+                moved_dirs.append(path)
+        elif mine.get("IsDir") and e.get("IsDir"):
+            continue                                  # same folder on both sides: look inside
+        elif not mine.get("IsDir") and not e.get("IsDir"):
+            h1, h2 = (mine.get("Hashes") or {}).get("md5"), (e.get("Hashes") or {}).get("md5")
+            if h1 and h1 == h2 and mine.get("Size") == e.get("Size"):
+                identical.append(path)
+            else:
+                conflicts.append(path)
+        else:
+            conflicts.append(path)
+    return {"moves": moves, "identical": identical, "conflicts": conflicts}
+
+
+def cmd_merge_folders(a):
+    """Where two top-level Drive folders share a name and the Accounts board links exactly one, move what the other holds into the
+    linked folder and archive the emptied twin inside it (POLICY.md, tier 2: the board decides which folder is the client's).
+    Moves only, by Drive id through the Drive API, each read back; the first failed read-back stops everything. Files that
+    collide by path with different content are left in the twin and named on the conflict card. Run after `discover`."""
+    import corpus_conflicts as cc
+    import corpus_stage as cs
+    from drive_api import DriveApi
+    dups = load("dup_folders.json", {}) or {}
+    raw = json.load(open(a.file))
+    items = cc.parse_items(raw.get("items", raw) if isinstance(raw, dict) else raw)
+    linked_by = collections_defaultdict_list()
+    for it in items:
+        if it["folder_id"]:
+            linked_by[it["folder_id"]].append(it)
+    api = DriveApi()
+    today = _nz_today()
+    merged, skipped, details = [], {}, load("merge_details.json", {}) or {}
+
+    def tree(fid):
+        return json.loads(cs.rc(["lsjson", "clients:", "--drive-root-folder-id", fid, "-R", "--no-mimetype", "--hash"]).stdout or "[]")
+    for name, fids in sorted(dups.items()):
+        linked = [f for f in fids if f in linked_by]
+        if len(fids) != 2 or len(linked) != 1 or len(linked_by[linked[0]]) != 1:
+            skipped[name] = "the board does not link exactly one of the two folders"
+            continue
+        lroot, oroot = linked[0], [f for f in fids if f != linked[0]][0]
+        plan = plan_folder_merge(lroot, oroot, tree(lroot), tree(oroot))
+        if len(plan["moves"]) > MERGE_CAP:
+            skipped[name] = "%d moves, over the cap of %d" % (len(plan["moves"]), MERGE_CAP)
+            continue
+        rec = {"client": name, "moved": [], "identical": plan["identical"], "conflicts": plan["conflicts"], "archived": False, "applied": bool(a.apply)}
+        if a.apply:
+            for m in plan["moves"]:
+                r = api.move(m["id"], m["to"], m["from"])
+                chk = api.get(m["id"])
+                if m["to"] not in (r.get("parents") or []) or m["from"] in (r.get("parents") or []) or chk.get("trashed") or m["to"] not in (chk.get("parents") or []):
+                    out({"ok": False, "error": "read-back failed for %s: %s" % (name, m["path"]), "merged": merged}, 3)
+                rec["moved"].append(m["path"])
+            if not plan["conflicts"]:
+                left = [e for e in tree(oroot) if not e.get("IsDir")]
+                left_paths = {e["Path"] for e in left}
+                if left_paths - set(plan["identical"]):
+                    skipped[name] = "the twin still holds files that were not planned: %s" % ", ".join(sorted(left_paths - set(plan["identical"]))[:3])
+                    continue
+                hold = api.find_folder(lroot, "Archived duplicate folders " + today) or api._call(
+                    "POST", "https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id",
+                    {"name": "Archived duplicate folders " + today, "mimeType": cc.FOLDER, "parents": [lroot]})["id"]
+                parent = api.get(oroot)["parents"][0]
+                api.move(oroot, hold, parent)
+                chk = api.get(oroot)
+                if hold not in (chk.get("parents") or []) or parent in (chk.get("parents") or []) or chk.get("trashed"):
+                    out({"ok": False, "error": "read-back failed archiving the twin of %s" % name, "merged": merged}, 3)
+                rec["archived"] = True
+                dups = {k: v for k, v in dups.items() if k != name}
+            event("maintainer-note", "%s: duplicate folders merged into the board-linked folder (%d moved, %d identical, %d conflicts, twin %s)" % (
+                name, len(rec["moved"]), len(plan["identical"]), len(plan["conflicts"]), "archived" if rec["archived"] else "left in place"))
+        else:
+            rec["moved"] = [m["path"] for m in plan["moves"]]
+        details[name] = {"conflicts": plan["conflicts"], "moved": len(plan["moves"])}
+        merged.append(rec)
+    save("dup_folders.json", dups)
+    save("merge_details.json", details)
+    out({"ok": True, "mode": "apply" if a.apply else "dry-run", "merged": merged, "skipped": skipped})
+
+
+def collections_defaultdict_list():
+    import collections
+    return collections.defaultdict(list)
 
 
 RECONCILE_REASONS = ("mount-name-mismatch", "duplicate-titles", "pending-entry", "old-shape", "missing-core", "stage-unknown")
@@ -1465,6 +1585,7 @@ def main():
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
     p = sp.add_parser("build-requests"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.set_defaults(f=cmd_build_requests)
+    p = sp.add_parser("merge-folders"); p.add_argument("--file", required=True); p.add_argument("--apply", action="store_true"); p.set_defaults(f=cmd_merge_folders)
     p = sp.add_parser("queue-reconcile"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_queue_reconcile)
     p = sp.add_parser("seed-client-ids"); p.add_argument("--file"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.add_argument("--commit", nargs="*"); p.set_defaults(f=cmd_seed_client_ids)
     p = sp.add_parser("promote"); p.add_argument("client"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_promote)

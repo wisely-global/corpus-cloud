@@ -638,5 +638,103 @@ class QueueReconcile(unittest.TestCase):
         self.assertIsNone(cr.resolve_folder("Barf", names, m))                       # too short
         self.assertIsNone(cr.resolve_folder("CMS", names, m))
 
+
+class FolderMerge(unittest.TestCase):
+    def d(self, path, id_):
+        return {"Path": path, "ID": id_, "IsDir": True}
+
+    def f(self, path, id_, md5="a", size=10):
+        return {"Path": path, "ID": id_, "IsDir": False, "Size": size, "Hashes": {"md5": md5}}
+
+    def test_what_the_linked_folder_lacks_moves_and_matching_folders_are_merged_inside(self):
+        linked = [self.d("Commercials", "lc")]
+        other = [self.d("Commercials", "oc"), self.f("Commercials/p.pdf", "f1"), self.d("Ref", "or"), self.f("Ref/x.xlsx", "f2")]
+        plan = cr.plan_folder_merge("LR", "OR", linked, other)
+        self.assertEqual([(m["path"], m["from"], m["to"]) for m in plan["moves"]], [("Ref", "OR", "LR"), ("Commercials/p.pdf", "oc", "lc")])
+        self.assertEqual(plan["conflicts"], [])
+
+    def test_a_moved_folder_hides_what_is_inside_it(self):
+        plan = cr.plan_folder_merge("LR", "OR", [], [self.d("Ref", "or"), self.f("Ref/x", "f2"), self.d("Ref/deep", "d3"), self.f("Ref/deep/y", "f4")])
+        self.assertEqual([m["path"] for m in plan["moves"]], ["Ref"])
+
+    def test_identical_files_are_not_moved_and_different_ones_are_conflicts(self):
+        linked = [self.f("a.pdf", "l1", "m1"), self.f("b.pdf", "l2", "m2")]
+        other = [self.f("a.pdf", "o1", "m1"), self.f("b.pdf", "o2", "OTHER"), self.f("c.pdf", "o3", "m3")]
+        plan = cr.plan_folder_merge("LR", "OR", linked, other)
+        self.assertEqual(plan["identical"], ["a.pdf"])
+        self.assertEqual(plan["conflicts"], ["b.pdf"])
+        self.assertEqual([m["path"] for m in plan["moves"]], ["c.pdf"])
+
+    def test_native_docs_without_a_hash_are_never_called_identical(self):
+        plan = cr.plan_folder_merge("LR", "OR", [{"Path": "n.docx", "ID": "l", "IsDir": False, "Size": -1}], [{"Path": "n.docx", "ID": "o", "IsDir": False, "Size": -1}])
+        self.assertEqual(plan["conflicts"], ["n.docx"])
+
+    def test_a_folder_against_a_file_is_a_conflict(self):
+        plan = cr.plan_folder_merge("LR", "OR", [self.f("x", "l")], [self.d("x", "o")])
+        self.assertEqual(plan["conflicts"], ["x"])
+
+
+class FolderMergeCommand(unittest.TestCase):
+    def _run(self, trees, apply=True, bad_readback=False):
+        import json, tempfile, io, contextlib, argparse, types
+        from unittest import mock
+        import corpus_stage as cs, drive_api
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        cr.save("dup_folders.json", {"Acme": ["L", "O"]})
+        board = os.path.join(tmp, "board.json")
+        json.dump({"items": [{"id": 1, "name": "Acme", "column_values": {"status": "Client", "link_mm2vffc2": "https://drive.google.com/drive/folders/L"}}]}, open(board, "w"))
+        parents = {"f1": ["O"], "f9": ["O"], "L": ["root"], "O": ["root"]}
+        calls = []
+
+        class FakeApi:
+            def __init__(self, *a, **k): pass
+            def get(self, fid): return {"id": fid, "parents": list(parents.get(fid, [])), "trashed": False}
+            def move(self, fid, new, old):
+                calls.append((fid, new))
+                if not bad_readback:
+                    parents[fid] = [new]
+                    for k in trees:
+                        trees[k] = [e for e in trees[k] if e["ID"] != fid]
+                return {"id": fid, "parents": list(parents.get(fid, [])), "trashed": False}
+            def find_folder(self, parent, name): return None
+            def _call(self, *a, **k): parents["HOLD"] = ["L"]; return {"id": "HOLD"}
+        def fake_rc(args, check=True):
+            fid = args[args.index("--drive-root-folder-id") + 1]
+            return types.SimpleNamespace(stdout=json.dumps(trees[fid]), returncode=0, stderr="")
+        events, buf = [], io.StringIO()
+        with mock.patch.object(cs, "rc", fake_rc), mock.patch.object(drive_api, "DriveApi", FakeApi), mock.patch.object(cr, "event", lambda k, d: events.append(d)), contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_merge_folders(argparse.Namespace(file=board, apply=apply))
+            except SystemExit:
+                pass
+        return json.loads(buf.getvalue()), calls, cr.load("dup_folders.json"), events
+
+    def f(self, path, id_, md5="a"):
+        return {"Path": path, "ID": id_, "IsDir": False, "Size": 5, "Hashes": {"md5": md5}}
+
+    def test_apply_moves_then_archives_the_twin_and_clears_the_duplicate(self):
+        r, calls, dups, events = self._run({"L": [], "O": [self.f("a.pdf", "f1")]})
+        self.assertEqual(calls, [("f1", "L"), ("O", "HOLD")])
+        self.assertEqual(dups, {})
+        self.assertTrue(r["merged"][0]["archived"])
+
+    def test_a_conflict_leaves_the_twin_in_place_and_names_the_file(self):
+        r, calls, dups, events = self._run({"L": [self.f("a.pdf", "l1", "x")], "O": [self.f("a.pdf", "f9", "y"), self.f("b.pdf", "f1")]})
+        self.assertEqual(calls, [("f1", "L")])
+        self.assertEqual(dups, {"Acme": ["L", "O"]})
+        self.assertEqual(r["merged"][0]["conflicts"], ["a.pdf"])
+
+    def test_dry_run_moves_nothing(self):
+        r, calls, dups, events = self._run({"L": [], "O": [self.f("a.pdf", "f1")]}, apply=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(r["mode"], "dry-run")
+
+    def test_a_failed_readback_stops_the_run(self):
+        r, calls, dups, events = self._run({"L": [], "O": [self.f("a.pdf", "f1")]}, bad_readback=True)
+        self.assertFalse(r["ok"])
+        self.assertEqual(dups, {"Acme": ["L", "O"]})
+
 if __name__ == "__main__":
     unittest.main()
