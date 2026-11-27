@@ -18,7 +18,7 @@ what changed goes back.
 | `permissions.example.json` | Pre-approval list for unattended sessions (allow the run's commands and connector tools, deny anything that deletes or drafts mail). Review before use. |
 | `test_corpus_run.py` | Unit tests for the helpers in `corpus_run.py`. |
 | `test_corpus_stage.sh` | Offline test (two local folders stand in for the shared drives). Run it after any change to `corpus_stage.py`. |
-| `patches/` | Fixes to the installed client-corpus skill (applied by `apply_skill_patches.py`) that belong in the skill library source (`Chris Skills/Skill Sources/`): `sync-last-sweep`, and `unattended-resolved-failures` (the daily digest no longer lists a failure, or a dropped-after-retries flag, for a client a later run in the same window swept). Each patch is skipped once the installed skill carries the fix itself (`unattended-resolved-failures` is upstream as of skill 13.12.0), so a newer skill release never fails container setup. |
+| `patches/` | Fixes to the installed client-corpus skill (applied by `apply_skill_patches.py`) that belong in the skill library source (`Chris Skills/Skill Sources/`): `sync-last-sweep`. Each patch is skipped once the installed skill carries the fix itself, so a newer skill release never fails container setup. The daily-digest fix (a failure or dropped flag for a client a later run swept) is upstream as of skill 13.12.0; its patch file is retired, and `apply_skill_patches.py` keeps the edits only to patch an older skill and skips them on 13.12.0 or later. |
 
 ## Where it runs
 
