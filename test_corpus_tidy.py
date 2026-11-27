@@ -100,6 +100,26 @@ class Plan(unittest.TestCase):
         self.assertNotIn("h11", moved)                          # newer than the live file: a person's question
         self.assertEqual([f["kind"] for f in p["flags"]], ["history-newer"])
 
+
+    def test_two_different_copies_of_superseded_history_are_both_archived_not_asked_about(self):
+        self.text = {"a": '{"x":1}', "b": '{"x":2}'}
+        p = self.plan([F("a1abcdef", "source-manifest-v5.json", created="1"), F("b2abcdef", "source-manifest-v5.json", created="2"),
+                       F("sm", "source-manifest.json")])
+        self.assertEqual(p["flags"], [])
+        self.assertEqual(sorted(o["dest"] for o in p["ops"]), ["Flo/%s/archive/a1abcdef" % ct.KB, "Flo/%s/archive/b2abcdef" % ct.KB])
+
+    def test_history_pair_without_a_live_canonical_is_still_left_alone(self):
+        self.text = {"a": '{"x":1}', "b": '{"x":2}'}
+        p = self.plan([F("a", "source-manifest-v5.json", created="1"), F("b", "source-manifest-v5.json", created="2")])
+        self.assertEqual(p["ops"], [])
+        self.assertTrue(p["flags"])
+
+    def test_dated_current_state_without_a_version_line_uses_the_name(self):
+        self.text = {"cs": "Version: 10\n", "h5": "no version line here\n", "h11": "none\n"}
+        p = self.plan([F("cs", "current-state.md"), F("h5", "current-state 2026-09-17 v5.md"), F("h11", "current-state 2026-10-02 v11.md")])
+        self.assertEqual([o["file"]["id"] for o in p["ops"]], ["h5"])
+        self.assertEqual([f["kind"] for f in p["flags"]], ["history-newer"])
+
     def test_history_without_its_canonical_is_left_alone(self):
         p = self.plan([F("n1", "now 2026-10-10.md")])
         self.assertEqual(p["ops"], [])

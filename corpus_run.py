@@ -962,6 +962,14 @@ def cmd_finish(a):
     out(res, 0 if res["ok"] else 3)
 
 
+def _nz_today():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Pacific/Auckland")).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def cmd_tidy(a):
     """Put one client's KB folder right wherever the evidence gives one answer (policy: POLICY.md). Dry run unless --apply.
     Moves only (native Google files out of the KB tree, duplicates, dated history); a real disagreement between two copies
@@ -969,7 +977,7 @@ def cmd_tidy(a):
     import corpus_stage as cs
     import corpus_tidy as ct
     drive = ct.RcloneDrive(cs.rc)
-    rep = ct.run(a.client, drive, a.today or datetime.now(timezone.utc).strftime("%Y-%m-%d"), do_apply=a.apply, cap=a.cap)
+    rep = ct.run(a.client, drive, a.today or _nz_today(), do_apply=a.apply, cap=a.cap)
     short = short_of(a.client)
     if rep["applied"]:
         event("maintainer-note", "%s: tidy: moved %d, wrote %d, flagged %d, deferred %d" % (
