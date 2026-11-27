@@ -131,9 +131,14 @@ class Plan(unittest.TestCase):
 
 
 class FakeDrive:
-    def __init__(self, files, texts=None, fail=None):
+    def __init__(self, files, texts=None, fail=None, check_error=None):
         self.files, self.texts, self.fail, self.calls = files, texts or {}, fail or set(), []
+        self.check_error = check_error
         self.where = {f["id"]: f["parent"] for f in files}
+
+    def check(self):
+        if self.check_error:
+            raise RuntimeError(self.check_error)
 
     def kb_tree(self, client):
         return self.files
@@ -165,7 +170,8 @@ class Apply(unittest.TestCase):
     def test_dry_run_changes_nothing(self):
         d = FakeDrive(self.files())
         r = ct.run("Flo", d, "2026-11-28")
-        self.assertFalse(r["applied"])
+        self.assertFalse(r["attempted"])
+        self.assertEqual(r["mode"], "dry-run")
         self.assertEqual(d.calls, [])
         self.assertEqual(r["planned"], 1)
 
@@ -196,10 +202,52 @@ class Apply(unittest.TestCase):
         self.assertEqual([x["status"] for x in r["results"]], ["moved", "failed", "skipped"])
         self.assertFalse([c for c in d.calls if c[0] == "put"])
 
+
+    def test_a_rclone_without_moveid_fails_before_planning_not_at_the_first_move(self):
+        d = FakeDrive(self.files(), check_error="this rclone has no drive `backend moveid` command")
+        with self.assertRaises(RuntimeError):
+            ct.run("Flo", d, "2026-11-28")                       # even the dry run says so
+        self.assertEqual(d.calls, [])
+
+    def test_applied_is_true_only_when_nothing_went_wrong(self):
+        ok = ct.run("Flo", FakeDrive(self.files()), "2026-11-28", do_apply=True)
+        self.assertTrue(ok["applied"] and ok["attempted"])
+        self.assertIn("1 of 1 operations done", ok["summary"])
+        bad = ct.run("Flo", FakeDrive(self.files(), fail={"doc00001"}), "2026-11-28", do_apply=True)
+        self.assertTrue(bad["attempted"])
+        self.assertFalse(bad["applied"])
+        self.assertIn("problem", bad["summary"])
+
+    def test_repeated_failures_stop_the_run_instead_of_littering_the_drive(self):
+        files = [F("d%07d" % i, "x%d.md" % i, mime=DOC) for i in range(8)]
+        d = FakeDrive(files, fail={f["id"] for f in files})
+        r = ct.run("Flo", d, "2026-11-28", do_apply=True)
+        self.assertEqual([x["status"] for x in r["results"]].count("failed"), ct.STOP_AFTER)
+        self.assertEqual(r["not_attempted"], 8 - ct.STOP_AFTER)
+        self.assertEqual(d.calls, [])
+
     def test_cap_defers_the_rest(self):
         files = [F("d%07d" % i, "x%d.md" % i, mime=DOC) for i in range(5)]
         r = ct.run("Flo", FakeDrive(files), "2026-11-28", do_apply=True, cap=2)
         self.assertEqual((r["moved"], r["deferred"]), (2, 3))
+
+
+class RcloneJson(unittest.TestCase):
+    def test_null_from_an_empty_folder_is_an_empty_list(self):
+        import subprocess
+        d = ct.RcloneDrive(lambda args, check=True: subprocess.CompletedProcess(args, 0, "null\n", ""))
+        self.assertEqual(d.children("any"), [])
+
+    def test_check_names_the_missing_command_and_the_version(self):
+        import subprocess
+        def rc(args, check=True):
+            if args[:2] == ["backend", "help"]:
+                return subprocess.CompletedProcess(args, 0, "copyid only", "")
+            return subprocess.CompletedProcess(args, 0, "rclone v1.69.1\n- os/version", "")
+        with self.assertRaises(RuntimeError) as cm:
+            ct.RcloneDrive(rc).check()
+        self.assertIn("v1.69.1", str(cm.exception))
+        self.assertIn("v1.70.0", str(cm.exception))
 
 
 if __name__ == "__main__":

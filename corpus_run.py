@@ -982,9 +982,9 @@ def cmd_tidy(a):
     # Logging needs a run record. Outside a run (a person supervising) the files still move and the report still prints.
     rep["logged_to_run"] = bool(a.apply and os.path.exists(os.path.join(work(), "run.json")))
     if rep["logged_to_run"]:
-        if rep["applied"]:
-            event("maintainer-note", "%s: tidy: moved %d, wrote %d, flagged %d, deferred %d" % (
-                short, rep.get("moved", 0), rep.get("written", 0), len(rep["flags"]), rep.get("deferred", 0)))
+        if rep["attempted"]:
+            event("maintainer-note", "%s: tidy: moved %d, wrote %d, flagged %d, deferred %d, problems %d" % (
+                short, rep.get("moved", 0), rep.get("written", 0), len(rep["flags"]), rep.get("deferred", 0), len(rep.get("problems", []))))
         for fl in rep["flags"][:3]:
             event("maintainer-note", "%s: needs-question: %s" % (short, fl["question"]))
         if rep["flags"]:

@@ -43,6 +43,16 @@ Acting alone is safe because of how it acts, not because someone checks first:
 
 So moves and cleanups of existing files go through rclone (`R tidy`), never the connector.
 
+## Reading a tidy plan
+
+- A destination such as `Archived from KB 2026-11-28/archive/1Zg3OTLc` is a folder: the file keeps its name inside a
+  folder named for the first eight characters of its Drive id, so two files with one name never collide.
+- The date in `Archived from KB DATE` is NZ local.
+- Native Google files show in rclone listings as `.docx` with size -1; the plan finds them by MIME type.
+- `mode` says dry-run or apply. After an apply, `applied` is true only when every operation succeeded; read `summary`
+  and `problems`. After three failed operations in a row the rest are `not-attempted`.
+- Needs rclone v1.70.0 or newer (`backend moveid`). `container-setup.sh` installs v1.76.0 and refuses an older one.
+
 ## How a hand-off must be worded
 
 "Needs a person" on its own is a defect. A hand-off states:

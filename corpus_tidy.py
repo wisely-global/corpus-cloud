@@ -235,7 +235,14 @@ class RcloneDrive:
         p = self.rc(args, check=False)
         if p.returncode != 0:
             raise RuntimeError("rclone %s failed (%d): %s" % (args[0], p.returncode, (p.stderr or "").strip()[-300:]))
-        return json.loads(p.stdout or "[]")
+        return json.loads(p.stdout or "[]") or []     # rclone 1.76 prints `null` for a folder with no children
+
+    def check(self):
+        """Fail before planning, not at the first move, if this rclone cannot move by id."""
+        p = self.rc(["backend", "help", "drive"], check=False)
+        if "moveid" not in (p.stdout or "") + (p.stderr or ""):
+            v = self.rc(["version"], check=False).stdout.splitlines()[:1]
+            raise RuntimeError("this rclone (%s) has no drive `backend moveid` command; R tidy needs v1.70.0 or newer" % (v[0] if v else "unknown version"))
 
     def children(self, folder_id):
         out = []
@@ -310,12 +317,20 @@ class RcloneDrive:
 
 
 # ---------------------------------------------------------------- applying
+STOP_AFTER = 3     # consecutive failed operations before the rest are not attempted (a systemic fault, not a bad file)
+
+
 def apply(drive, ops, cap=DEFAULT_CAP):
     """Run the plan. Each move is re-checked against the plan first (a file that changed or went is skipped) and
     read back after (the id must be in the destination and gone from its old folder)."""
-    results = []
+    results, streak = [], 0
     for i, op in enumerate(ops):
         res = {"op": op["op"], "why": op.get("why")}
+        if streak >= STOP_AFTER:
+            res["status"] = "not-attempted"
+            res["path"] = op["file"]["path"] if op["op"] == "move" else op["dest_path"]
+            results.append(res)
+            continue
         if i >= cap:
             res["status"] = "deferred"
         elif op["op"] == "move":
@@ -343,22 +358,31 @@ def apply(drive, ops, cap=DEFAULT_CAP):
                 except Exception as e:  # noqa: BLE001
                     res["status"], res["detail"] = "failed", str(e)[:200]
         results.append(res)
+        streak = streak + 1 if res["status"] in ("failed", "readback-failed") else 0
     return results
 
 
 def run(client, drive, today, do_apply=False, cap=DEFAULT_CAP):
+    if hasattr(drive, "check"):
+        drive.check()
     files = drive.kb_tree(client)
     p = plan(client, files, drive.read, today)
-    report = {"client": client, "files_seen": len(files), "planned": len(p["ops"]), "flags": p["flags"], "applied": False,
+    report = {"client": client, "mode": "dry-run", "files_seen": len(files), "planned": len(p["ops"]), "flags": p["flags"],
+              "attempted": False, "applied": False,
               "ops": [{"op": o["op"], "path": (o["file"]["path"] if o["op"] == "move" else o["dest_path"]),
                        "dest": o.get("dest"), "why": o["why"]} for o in p["ops"]]}
     if do_apply and p["ops"]:
         report["results"] = apply(drive, p["ops"], cap)
-        report["applied"] = True
+        report["attempted"] = True
+        report["mode"] = "apply"
         report["moved"] = sum(r["status"] == "moved" for r in report["results"])
         report["written"] = sum(r["status"] == "written" for r in report["results"])
         report["deferred"] = sum(r["status"] == "deferred" for r in report["results"])
+        report["not_attempted"] = sum(r["status"] == "not-attempted" for r in report["results"])
         report["problems"] = [r for r in report["results"] if r["status"] not in ("moved", "written", "deferred")]
+        report["applied"] = not report["problems"]            # true only when nothing went wrong
+        report["summary"] = ("%d of %d operations done" % (report["moved"] + report["written"], len(p["ops"]))
+                             + ("" if report["applied"] else "; %d problem(s): see problems" % len(report["problems"])))
     return report
 
 
