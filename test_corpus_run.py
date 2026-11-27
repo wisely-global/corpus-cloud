@@ -417,5 +417,56 @@ class TidyWiring(unittest.TestCase):
         self.assertEqual((events, recorded), ([], []))
 
 
+class AdviseCards(unittest.TestCase):
+    def test_cards_lead_the_email_and_replace_the_generic_duplicate_line(self):
+        import json, tempfile, io, contextlib, argparse
+        import corpus_conflicts as cc
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(cr.runs_dir())
+        card = cc.card_duplicate_folders("Mossop", [{"id": "OLD", "created": "2025-05-17T00:00:00Z", "facts": None}, {"id": "NEW", "created": "2026-05-02T00:00:00Z", "facts": None}], {})
+        card["first_seen"] = "2026-11-27"
+        json.dump({"cards": [card]}, open(cr.conflicts_path(), "w"))
+        rec = {"run_id": "run-1", "started": cr.now_iso(), "clients": [{"client": "Mossop", "outcome": "skipped", "reason": "duplicate-titles"}], "events": []}
+        open(os.path.join(cr.runs_dir(), "run-1.md"), "w").write("# r\n<!-- run-data: %s -->\n" % json.dumps(rec))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_advise(argparse.Namespace(run=None, hours=24))
+            except SystemExit:
+                pass
+        text = json.loads(buf.getvalue()).get("text") if buf.getvalue().lstrip().startswith("{") else buf.getvalue()
+        self.assertIn("CONFLICT: Mossop", text)
+        self.assertIn("What we need from you:", text)
+        self.assertNotIn("What it means: Two Drive files carry the same corpus file title", text)
+
+
+class Promote(unittest.TestCase):
+    OK = dict(names={"current-state.md", "now.md", "source-manifest.json", "changelog.md", "brief.json"}, live_exists=False,
+              manifest={"sources": []}, cs_text="# X\nVersion: 1\n", budget_ok=True, stage_row={"stage": "client", "client_id": "CL-0195"})
+
+    def problems(self, **kw):
+        a = dict(self.OK)
+        a.update(kw)
+        return cr.promote_problems(a["names"], a["live_exists"], a["manifest"], a["cs_text"], a["budget_ok"], a["stage_row"])
+
+    def test_a_complete_build_for_a_board_client_may_go_live(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_each_skill_check_blocks_it(self):
+        self.assertIn("shadow is missing now.md", self.problems(names={"current-state.md", "source-manifest.json", "changelog.md"}))
+        self.assertIn("a live corpus folder already exists: promotion never overwrites it", self.problems(live_exists=True))
+        self.assertTrue(any("manifest" in e for e in self.problems(manifest={"nope": 1})))
+        self.assertIn("current-state.md has no Version line", self.problems(cs_text="no version"))
+        self.assertTrue(any("budget" in e for e in self.problems(budget_ok=False)))
+        self.assertEqual(self.problems(names=None), ["no shadow folder to promote"])
+
+    def test_the_board_must_say_client_and_hold_a_client_id(self):
+        self.assertTrue(any("Client (stage" in e for e in self.problems(stage_row={"stage": "prospect", "client_id": "CL-1"})))
+        self.assertTrue(any("Client (stage" in e for e in self.problems(stage_row=None)))
+        self.assertIn("the Accounts item has no Client ID", self.problems(stage_row={"stage": "client", "client_id": None}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,7 @@ This tool does the repeated mechanical parts, in the order a run needs them, and
 Environment: STAGE_ROOT (as corpus_stage.py), SKILL_DIR (default: the installed client-corpus
 skill), CORPUS_WORK (scratch folder, default ~/.corpus-work), GMAIL_SWEEP (on|off, default off). Exit 3 means stop and treat as an error.
 """
-import argparse, glob, json, os, shutil, subprocess, sys, time
+import argparse, glob, json, os, re, shutil, subprocess, sys, time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -311,6 +311,7 @@ def cmd_discover(a):
     since = parse_iso(s["since"])
     top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
     ids, dup_folders = split_top_folders(top)
+    save("dup_folders.json", dup_folders)       # read by stages-from-board to build the conflict cards
     # ONE whole-drive file listing straight from the Drive API (not the mount). It yields the files changed
     # since the last run and the pending syncs (client/KB/pending-*.json), which are old files, so no age filter.
     # Corpus subfolders (archive, session-logs, undo...) are not listed at all.
@@ -638,9 +639,63 @@ def cmd_wrap(a):
     out({"ok": all(v in (0, True) for v in res.values()), **res})
 
 
-def _status_of(v):
+def status_map():
+    """Optional status-map.json in Wisely Shared Config: {"Customer": "client"}. How a person answers an unknown-status card."""
+    try:
+        m = json.load(open(os.path.join(root(), OPS, "status-map.json")))
+        return {k: v for k, v in m.items() if v in ("client", "past-client", "prospect")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _status_of(v, extra=None):
     label = v if isinstance(v, str) else ""
-    return {"Client": "client", "Past Client": "past-client", "Buying process": "prospect"}.get(label, label)
+    m = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect"}
+    m.update(extra or {})
+    return m.get(label, label)
+
+
+def conflicts_path():
+    return os.path.join(runs_dir(), "conflicts.json")
+
+
+def conflict_cards():
+    try:
+        return json.load(open(conflicts_path())).get("cards", [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def build_conflict_cards(raw_items):
+    """Derive every open conflict from the live board and Drive. Replaces the whole list each run, so a fixed
+    conflict disappears by itself; only first_seen is carried over."""
+    import corpus_conflicts as cc
+    items = cc.parse_items(raw_items)
+    dups = cc.duplicate_accounts(items)
+    unknown = cc.unknown_statuses(items, status_map())
+    dup_folders = load("dup_folders.json", {}) or {}
+    facts, created = {}, {}
+    wanted = {i["folder_id"] for g in dups for i in g if i["folder_id"]} | {f for ids in dup_folders.values() for f in ids}
+    if wanted and os.environ.get("CLIENTS_DRIVE_ID"):
+        try:
+            import corpus_stage as cs, corpus_tidy as ct
+            drive = ct.RcloneDrive(cs.rc)
+            created = {r["id"]: r.get("createdTime") for r in drive.children(os.environ["CLIENTS_DRIVE_ID"]) if r.get("mimeType") == cc.FOLDER}
+            for fid in wanted:            # the whole tree: real content sits in subfolders
+                p = cs.rc(["lsjson", "clients:", "--drive-root-folder-id", fid, "-R", "--no-mimetype"], check=False)
+                if p.returncode == 0:
+                    facts[fid] = cc.folder_facts(json.loads(p.stdout or "[]") or [])
+        except Exception:  # noqa: BLE001
+            pass          # a card without folder counts is still a card
+    by_folder = {i["folder_id"]: i for i in items if i["folder_id"]}
+    cards = [cc.card_duplicate_accounts(g, facts, created) for g in dups]
+    cards += [cc.card_duplicate_folders(n, [{"id": f, "created": created.get(f), "facts": facts.get(f)} for f in ids], by_folder)
+              for n, ids in sorted(dup_folders.items())]
+    cards += [cc.card_unknown_status(label, its) for label, its in sorted(unknown.items())]
+    cards = cc.merge_first_seen(conflict_cards(), cards, _nz_today())
+    os.makedirs(runs_dir(), exist_ok=True)
+    json.dump({"updated": now_iso(), "cards": cards}, open(conflicts_path(), "w"), indent=1)
+    return cards
 
 
 def cmd_stages(a):
@@ -658,7 +713,7 @@ def cmd_stages(a):
             continue
         if m.group(1) in byid:
             dupes.add(m.group(1))
-        byid[m.group(1)] = {"short": cv.get("text_mm8pevdf") or it.get("name"), "stage": _status_of(cv.get("status")),
+        byid[m.group(1)] = {"short": cv.get("text_mm8pevdf") or it.get("name"), "stage": _status_of(cv.get("status"), status_map()),
                             "item_id": str(it.get("id")), "client_id": cv.get("text_mm8pgmx8")}
     stages, missing, ambiguous = {}, [], []
     for c, v in cands.items():
@@ -684,10 +739,29 @@ def cmd_stages(a):
     stages.update(fallback)
     missing = [c for c in missing if c not in fallback]
     json.dump(stages, open(os.path.join(work(), "stages.json"), "w"), indent=1)
-    out({"ok": not ambiguous and not missing, "matched": len(stages) - len(fallback), "from_client_list": sorted(fallback),
+    try:
+        ncards = len(build_conflict_cards(items))
+    except Exception as e:  # noqa: BLE001
+        ncards = "cards not built: %s" % type(e).__name__
+    out({"ok": not ambiguous and not missing, "matched": len(stages) - len(fallback), "from_client_list": sorted(fallback), "conflict_cards": ncards,
          "not_found": missing, "ambiguous": ambiguous, "stages_file": os.path.join(work(), "stages.json"),
          "next": "look up not_found clients on the board by name; ambiguous ones are skipped and recorded, never guessed" if (missing or ambiguous) else "run plan"},
         0 if not (missing or ambiguous) else 0)
+
+
+RESOLVABLE_BY_LIVE_CHECK = ("mount-name-mismatch", "duplicate-titles", "pending-entry")
+
+
+def live_preflight(c):
+    """The skill's own preflight on the client's KB folder as it is on Drive now."""
+    kb = kb_of(c)
+    titles = json.loads(rclone(["lsjson", "clients:%s/%s" % (c, KB), "--no-modtime"]).stdout or "[]")
+    if not os.path.isdir(kb) or not titles:
+        return {"verdict": "skip", "reasons": ["no-corpus"]}
+    tf = os.path.join(work(), "titles-live.json")
+    json.dump([{"id": e["ID"], "title": e["Name"], "mimeType": e.get("MimeType", "")} for e in titles], open(tf, "w"))
+    rc, pf = jpy("unattended.py", ["preflight", "--corpus", kb, "--titles", tf])
+    return pf
 
 
 def cmd_maintenance(a):
@@ -726,7 +800,22 @@ def cmd_maintenance(a):
                 notes[n] = "not staged (%s): work this client through the Drive connector, as nightly-maintenance.md says" % r["error"]
             else:
                 staged.append(n)
-    out({"ok": True, "raw": d, "staged": staged, "not_staged": notes,
+    # The queue row says what was true when it was raised. Check the live folder now: a row whose problem is gone
+    # is resolved, not "needs a person" (Mondiale, Service Foods, Sydney Opera House and Serko were all left open this way).
+    live, resolved = {}, []
+    problem_of = {(i.get("folder_name") or fold.get(i.get("client")) or i.get("client")): i.get("problem") for i in items if isinstance(i, dict)}
+    for n in staged:
+        try:
+            pf = live_preflight(n)
+        except Exception as e:  # noqa: BLE001
+            live[n] = {"verdict": "unknown", "error": type(e).__name__}
+            continue
+        live[n] = {"verdict": pf.get("verdict"), "reasons": pf.get("reasons"), "detail": (pf.get("detail") or [])[:5]}
+        if pf.get("verdict") == "ok" and problem_of.get(n) in RESOLVABLE_BY_LIVE_CHECK:
+            resolved.append(n)
+    out({"ok": True, "raw": d, "staged": staged, "not_staged": notes, "live_check": live, "already_resolved": resolved,
+         "next": "For each client in already_resolved the problem in its queue row no longer exists in the live folder: record it with `R record-swept CLIENT --board not-needed` "
+                 "(or sweep it if it has new files). Never report it as needing a person.",
          "folder_ids": {n: ids.get(n) for n in names}})
 
 
@@ -790,6 +879,75 @@ def cmd_requests(a):
         if j.get("status") == "requested":
             reqs.append({"file": os.path.basename(f), "client": j.get("client"), "by": j.get("by")})
     out({"ok": True, "requested": reqs[:2], "waiting": max(0, len(reqs) - 2)})
+
+
+PROMOTE_CORE = ("current-state.md", "now.md", "source-manifest.json", "changelog.md")
+
+
+def promote_problems(names, live_exists, manifest, cs_text, budget_ok, stage_row):
+    """Why a shadow corpus may not go live yet (empty list: it may). The skill's own promote checks plus the board identity
+    check: the Accounts board says the client is a Client and has a Client ID (the board decides, POLICY.md)."""
+    errs = []
+    if names is None:
+        errs.append("no shadow folder to promote")
+    else:
+        errs += ["shadow is missing %s" % n for n in PROMOTE_CORE if n not in names]
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("sources"), list):
+            errs.append("source-manifest.json does not parse as a manifest")
+        if not re.search(r"^\s*Version:\s*\d+", cs_text or "", re.M):
+            errs.append("current-state.md has no Version line")
+        if budget_ok is False:
+            errs.append("current-state.md or now.md is over its budget")
+    if live_exists:
+        errs.append("a live corpus folder already exists: promotion never overwrites it")
+    if not stage_row or stage_row.get("stage") != "client":
+        errs.append("the Accounts board does not say this client is a Client (stage %r)" % ((stage_row or {}).get("stage")))
+    elif not stage_row.get("client_id"):
+        errs.append("the Accounts item has no Client ID")
+    return errs
+
+
+def cmd_promote(a):
+    """Switch a client's shadow corpus live. A Drive folder rename (metadata only, atomic, every file id kept), after the
+    skill's promote checks and the board identity check. Check failures are reported, not errors: the shadow stays for next time."""
+    import tempfile
+    import corpus_stage as cs, drive_api
+    sh_name = KB + " (shadow)"
+    dirs = json.loads(rclone(["lsjson", "clients:%s" % a.client, "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout or "[]")
+    by = {d["Name"]: d["ID"] for d in dirs}
+    names, manifest, cs_text, budget_ok = None, None, "", None
+    if sh_name in by:
+        files = json.loads(rclone(["lsjson", "clients:%s/%s" % (a.client, sh_name), "--files-only", "--no-mimetype", "--no-modtime"]).stdout or "[]")
+        names = {f["Name"] for f in files}
+        tmp = tempfile.mkdtemp(prefix="promote-")
+        try:
+            for n in ("source-manifest.json", "current-state.md", "now.md"):
+                if n in names:
+                    rclone(["copyto", "clients:%s/%s/%s" % (a.client, sh_name, n), os.path.join(tmp, n)])
+            try:
+                manifest = json.load(open(os.path.join(tmp, "source-manifest.json")))
+            except Exception:  # noqa: BLE001
+                manifest = None
+            cs_text = open(os.path.join(tmp, "current-state.md"), encoding="utf-8").read() if "current-state.md" in names else ""
+            hot = [os.path.join(tmp, n) for n in ("current-state.md", "now.md") if n in names]
+            if hot and skill():
+                budget_ok = py("budget_check.py", hot).returncode == 0
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    stage_row = (load("stages.json", {}) or {}).get(a.client)
+    errs = promote_problems(names, KB in by, manifest, cs_text, budget_ok, stage_row)
+    if errs:
+        out({"ok": False, "promoted": False, "problems": errs, "client": a.client,
+             "next": "leave the shadow folder in place, record maintenance-retry and name the first problem; it is retried next night"})
+    if a.dry_run:
+        out({"ok": True, "promoted": False, "dry_run": True, "client": a.client})
+    api = drive_api.DriveApi()
+    api.rename(by[sh_name], KB)
+    after = json.loads(rclone(["lsjson", "clients:%s" % a.client, "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout or "[]")
+    names_after = {d["Name"]: d["ID"] for d in after}
+    done = names_after.get(KB) == by[sh_name] and sh_name not in names_after
+    out({"ok": done, "promoted": done, "client": a.client, "folder_id": by[sh_name],
+         "next": "run `R wrap %s` so its brief and the company index are written" % a.client if done else "the rename did not read back: report it"}, 0 if done else 3)
 
 
 def cmd_shadow(a):
@@ -890,9 +1048,17 @@ def cmd_advise(a):
         for why in reasons:
             if why and why not in BENIGN:
                 items[(client, why)] = run
+    import corpus_conflicts as cc
+    cards = conflict_cards()
+    explained = {c["client"] for c in cards if c["kind"] == "duplicate-folders"}
+    items = {k: v for k, v in items.items() if not (k[1] == "duplicate-titles" and k[0] in explained)}
     lines = []
-    if items:
+    if items or cards:
         lines += ["How to resolve", FIX_VIA, ""]
+    if cards:
+        lines += ["Conflicts that need a person (each is a real disagreement; the run has not chosen):", ""]
+        lines += cc.render(cards, _owner_for("default"))
+    if items:
         for (client, why), run in sorted(items.items()):
             meaning, cmds = ADVICE.get(why, ("See the run record for the reason.", ['/tidy "{c}"']))
             lines.append("%s  [%s]  owner: %s" % (client, why, _owner_for(client)))
@@ -1012,6 +1178,7 @@ def main():
     p.add_argument("--board", default="not-needed", choices=["ok", "failed", "skipped", "not-needed"]); p.set_defaults(f=cmd_record_swept)
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
+    p = sp.add_parser("promote"); p.add_argument("client"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_promote)
     p = sp.add_parser("tidy"); p.add_argument("client"); p.add_argument("--apply", action="store_true")
     p.add_argument("--cap", type=int, default=40); p.add_argument("--today"); p.set_defaults(f=cmd_tidy)
     p = sp.add_parser("finish"); p.add_argument("--no-push", action="store_true"); p.set_defaults(f=cmd_finish)
