@@ -493,10 +493,29 @@ class BuildRequests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("empty template", why)
 
+    def test_a_thin_folder_waits_for_three_files(self):
+        self.assertFalse(cr.build_request_decision(self.CLIENT, 2, False, 0)[0])
+        self.assertTrue(cr.build_request_decision(self.CLIENT, 3, False, 0)[0])
+
+    def test_no_activity_in_twelve_months_means_no_request(self):
+        self.assertFalse(cr.build_request_decision(self.CLIENT, 9, False, 0, newest="2025-11-01", today="2026-11-28")[0])
+        self.assertTrue(cr.build_request_decision(self.CLIENT, 9, False, 0, newest="2025-12-01", today="2026-11-28")[0])
+        self.assertTrue(cr.build_request_decision(self.CLIENT, 9, False, 0, newest=None, today="2026-11-28")[0])
+
+    def test_seed_plan_continues_the_board_sequence_for_eligible_clients_only(self):
+        nc = {"A": {"folder_id": "1", "files": 9, "newest": "2026-10-01"}, "B": {"folder_id": "2", "files": 5, "newest": "2026-09-01"},
+              "Old": {"folder_id": "3", "files": 8, "newest": "2024-01-01"}, "Thin": {"folder_id": "4", "files": 2, "newest": "2026-10-01"},
+              "HasId": {"folder_id": "5", "files": 7, "newest": "2026-10-01"}, "Prosp": {"folder_id": "6", "files": 7, "newest": "2026-10-01"}}
+        st = {n: {"stage": "client", "client_id": None, "short": n, "item_id": "i" + n} for n in nc}
+        st["HasId"]["client_id"] = "CL-0007"; st["Prosp"]["stage"] = "prospect"
+        plan = cr.seed_plan(nc, st, ["CL-0204", "CL-0007", None, "x"], {}, 10, "2026-11-28")
+        self.assertEqual([(p["folder"], p["client_id"]) for p in plan], [("A", "CL-0205"), ("B", "CL-0206")])
+        self.assertEqual(len(cr.seed_plan(nc, st, [], {}, 1, "2026-11-28")), 1)
+
     def test_one_request_per_client_and_a_cap_per_night(self):
         self.assertFalse(cr.build_request_decision(self.CLIENT, 6, True, 0)[0])
-        self.assertFalse(cr.build_request_decision(self.CLIENT, 6, False, 2)[0])
-        self.assertTrue(cr.build_request_decision(self.CLIENT, 6, False, 1)[0])
+        self.assertFalse(cr.build_request_decision(self.CLIENT, 6, False, 2, cap=2)[0])
+        self.assertTrue(cr.build_request_decision(self.CLIENT, 6, False, 1, cap=2)[0])
 
     def test_compute_no_corpus_finds_folders_with_files_and_no_kb_or_shadow(self):
         ids = {"OneNZ": "id1", "Serko": "id2", "NewCo": "id3", "Empty": "id4"}

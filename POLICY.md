@@ -68,7 +68,7 @@ Drive folder rename (metadata only, atomic, every file id kept), when all of the
   both hot files are within budget, and no live corpus exists to overwrite;
 - the Accounts board says the client is a **Client** and the item has a Client ID.
 
-**Requests file themselves.** The nightly runs `R build-requests`: for each Client on the board with a Client ID whose folder holds at least one real file outside a corpus, and which has no shadow folder and no earlier request, it files a build request (cap 2 a night, so a backlog drains over several nights). Clients without a Client ID, prospects, past clients and folders the board does not link are not filed.
+**Requests file themselves.** The nightly runs `R build-requests`: for each board Client whose folder holds at least 3 real files outside a corpus, has had a file change in the last 12 months, and has no shadow folder and no earlier request, it files a build request (up to 10 a night; builds stop being started 4 hours into the run, and the rest wait for the next night). A Client ID is used only by the corpus process, so when a qualifying Client lacks one, `R seed-client-ids` plans the next `CL-NNNN` in the board's own sequence, the run writes it to that item's Client ID column only, reads it back, and records it. Prospects, past clients, folders the board does not link, quiet folders and thin folders are not filed.
 
 If a check fails the shadow stays and the run retries next night; the failing check is named. People review the facts
 in the corpus when they use it (corrections go in `corrections-log.md`), not the build process.

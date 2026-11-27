@@ -312,12 +312,14 @@ def compute_no_corpus(ids, files, dirs):
     folders are not in `ids`, so they never appear."""
     has_kb = {d["Path"].split("/")[0] for d in dirs if d.get("Path", "").endswith("/" + KB)}
     has_shadow = {d["Path"].split("/")[0] for d in dirs if d.get("Path", "").endswith("/" + KB + " (shadow)")}
-    count = {}
+    count, newest = {}, {}
     for e in files:
         parts = e["Path"].split("/")
         if len(parts) >= 2:
             count[parts[0]] = count.get(parts[0], 0) + 1
-    return {n: {"folder_id": fid, "files": count.get(n, 0)} for n, fid in ids.items() if n not in has_kb and n not in has_shadow}
+            newest[parts[0]] = max(newest.get(parts[0], ""), (e.get("ModTime") or "")[:10])
+    return {n: {"folder_id": fid, "files": count.get(n, 0), "newest": newest.get(n) or None}
+            for n, fid in ids.items() if n not in has_kb and n not in has_shadow}
 
 
 def cmd_discover(a):
@@ -900,10 +902,19 @@ def cmd_requests(a):
 
 
 AI_EMAIL = "ai@wiselyglobal.tech"
-BUILD_REQUEST_CAP = 2
+BUILD_REQUEST_CAP = 10
+MIN_FILES = 3              # fewer real files than this makes a thin corpus: not worth building yet
+ACTIVE_DAYS = 365          # a folder with no change in this long is not a live engagement: no build request
 
 
-def build_request_decision(row, folder_files, has_request, filed, cap=BUILD_REQUEST_CAP, min_files=1):
+def is_stale(newest, today, days=ACTIVE_DAYS):
+    """True when the folder's newest file is more than `days` before `today` (YYYY-MM-DD). Unknown dates are not stale."""
+    if not newest or not today:
+        return False
+    return (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(newest[:10], "%Y-%m-%d")).days > days
+
+
+def build_request_decision(row, folder_files, has_request, filed, cap=BUILD_REQUEST_CAP, min_files=MIN_FILES, newest=None, today=None):
     """(file it?, why). The board decides identity (a Client with a Client ID, as `R promote` will also require); the folder
     must hold real files, so an empty template never becomes an empty corpus; one request per client, ever; a cap per night."""
     if not row or row.get("stage") != "client":
@@ -911,7 +922,9 @@ def build_request_decision(row, folder_files, has_request, filed, cap=BUILD_REQU
     if not row.get("client_id"):
         return False, "the Accounts item has no Client ID"
     if folder_files < min_files:
-        return False, "the folder holds no files (an empty template)"
+        return False, "the folder holds fewer than %d files (an empty template or too thin to build)" % min_files
+    if is_stale(newest, today):
+        return False, "no activity in the last 12 months"
     if has_request:
         return False, "a build request already exists"
     if filed >= cap:
@@ -948,7 +961,7 @@ def cmd_build_requests(a):
         row = stages.get(name)
         short = (row or {}).get("short") or name
         has_req = cc.name_key(short) in have or cc.name_key(name) in have
-        ok, why = build_request_decision(row, info["files"], has_req, len(filed), a.cap)
+        ok, why = build_request_decision(row, info["files"], has_req, len(filed), a.cap, newest=info.get("newest"), today=_nz_today())
         if row and row.get("stage") == "client":
             considered += 1
         if not ok:
@@ -971,6 +984,52 @@ def cmd_build_requests(a):
         filed.append({"client": short, "folder": name, "files": info["files"]})
         event("maintainer-note", "%s: build requested automatically (%d files, no corpus, board says Client)" % (short, info["files"]))
     out({"ok": True, "filed": filed, "skipped": skipped, "clients_checked": considered, "cap": a.cap})
+
+
+def seed_plan(nc, stages, board_ids, have, cap, today):
+    """Client IDs to seed: board Clients with no Client ID whose folder would otherwise be filed (files, active, no request),
+    most files first, at most `cap`. IDs continue the board's own CL-NNNN sequence."""
+    import corpus_conflicts as cc
+    top = max([int(m.group(1)) for m in (re.match(r"^CL-(\d+)$", str(i or "")) for i in board_ids) if m] or [0])
+    plan = []
+    for name, info in sorted(nc.items(), key=lambda kv: -kv[1]["files"]):
+        row = stages.get(name)
+        if len(plan) >= cap or not row or row.get("stage") != "client" or row.get("client_id") or not row.get("item_id") or row.get("from_list"):
+            continue
+        short = row.get("short") or name
+        if info["files"] < MIN_FILES or is_stale(info.get("newest"), today) or cc.name_key(short) in have or cc.name_key(name) in have:
+            continue
+        top += 1
+        plan.append({"folder": name, "item_id": row["item_id"], "short": short, "client_id": "CL-%04d" % top, "files": info["files"]})
+    return plan
+
+
+def cmd_seed_client_ids(a):
+    """Plan Client IDs for board Clients that lack one (the ID is only used by the corpus process, so the run seeds it), or
+    with --commit ITEM_ID... record the ones whose board write was read back, so build-requests sees them."""
+    nc, stages = load("no_corpus.json", None), load("stages.json", {}) or {}
+    if a.commit:
+        plan = {p["item_id"]: p for p in (load("seed_plan.json", []) or [])}
+        done = []
+        for name, row in stages.items():
+            p = plan.get(str(row.get("item_id")))
+            if p and str(row.get("item_id")) in a.commit and not row.get("client_id"):
+                row["client_id"] = p["client_id"]
+                done.append({"client": p["short"], "client_id": p["client_id"]})
+        save("stages.json", stages)
+        for d in done:
+            event("maintainer-note", "%s: Client ID %s seeded on the Accounts board by the nightly run" % (d["client"], d["client_id"]))
+        out({"ok": True, "committed": done, "not_committed": [i for i in a.commit if i not in plan]})
+        return
+    if nc is None or not a.file:
+        out({"ok": False, "error": "needs no_corpus.json (run `discover`) and --file BOARD_EXPORT"}, 3)
+    raw = json.load(open(a.file))
+    items = raw.get("items", raw) if isinstance(raw, dict) else raw
+    ids = [(it.get("column_values", {}) or {}).get("text_mm8pgmx8") for it in items]
+    plan = seed_plan(nc, stages, ids, request_keys(), a.cap, _nz_today())
+    save("seed_plan.json", plan)
+    out({"ok": True, "assign": plan, "column": "text_mm8pgmx8 (Client ID)",
+         "next": "write each client_id to its item with change_item_column_values (only that column), read the echo back, then run `R seed-client-ids --commit ITEM_ID...` for the ones that matched"})
 
 
 PROMOTE_CORE = ("current-state.md", "now.md", "source-manifest.json", "changelog.md")
@@ -1276,6 +1335,7 @@ def main():
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
     p = sp.add_parser("build-requests"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.set_defaults(f=cmd_build_requests)
+    p = sp.add_parser("seed-client-ids"); p.add_argument("--file"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.add_argument("--commit", nargs="*"); p.set_defaults(f=cmd_seed_client_ids)
     p = sp.add_parser("promote"); p.add_argument("client"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_promote)
     p = sp.add_parser("tidy"); p.add_argument("client"); p.add_argument("--apply", action="store_true")
     p.add_argument("--cap", type=int, default=40); p.add_argument("--today"); p.set_defaults(f=cmd_tidy)
