@@ -24,11 +24,14 @@ merges them. It flags only the keys that collide, and names them.
 Acting alone is safe because of how it acts, not because someone checks first:
 
 1. **Move, never delete.** Files go to a sibling folder or `archive/` in the same client folder, so any action is
-   undone by moving the file back. Nothing is trashed by the cleanup, because rclone has no trash-by-id and a move
-   needs no delete permission.
+   undone by moving the file back. A move is a Drive parent change through the API (`drive_api.py`), which keeps the
+   file's id, content and history. It is not `rclone backend moveid`: for a native Google Doc that falls back to
+   copy then delete, and on 28 Nov 2026 it trashed three Flo & Frankie files that never reached their destination
+   (all three restored; nothing lost). "Never delete" is only true if it is checked, so safeguard 4 checks it.
 2. **Identify files by Drive id**, not by path. Drive allows two files with one name.
 3. **Re-check before acting.** A file that changed since it was planned is skipped, not overwritten.
-4. **Read back after acting.** The id must be in its destination and gone from where it was.
+4. **Read back after acting.** The file must be in its destination, in no other folder, and **not trashed**. A file
+   found trashed is restored at once. One failed read-back stops the whole run; three failed operations in a row stop it too.
 5. **Evidence for every action**: why (byte-identical, superset, dated history), which files, and where they went, in the run record.
 6. **Core corpus files are never touched** by the cleanup (`current-state.md`, `now.md`, `changelog.md`, `source-manifest.json`, the registers).
 7. **A cap per client per night** (40 operations). The rest waits.
@@ -39,9 +42,9 @@ Acting alone is safe because of how it acts, not because someone checks first:
 | Actor | Can | Cannot |
 |---|---|---|
 | Drive connector (`ai@wiselyglobal.tech`) | Read everything; change only files it created itself | Move or trash files made by anyone or anything else, even where the account is a writer |
-| rclone service account (Content Manager on the Clients drive) | Move and rename any file; create folders | Permanently delete (and the tools never ask it to) |
+| Service account (Content Manager on the Clients drive), used by rclone for listing and reading and by `drive_api.py` for moves | Move any file; create folders; restore a file from the trash | Permanently delete (and the tools never ask it to) |
 
-So moves and cleanups of existing files go through rclone (`R tidy`), never the connector.
+So moves and cleanups of existing files go through `R tidy` and the service account, never the connector.
 
 ## Reading a tidy plan
 
@@ -51,7 +54,7 @@ So moves and cleanups of existing files go through rclone (`R tidy`), never the 
 - Native Google files show in rclone listings as `.docx` with size -1; the plan finds them by MIME type.
 - `mode` says dry-run or apply. After an apply, `applied` is true only when every operation succeeded; read `summary`
   and `problems`. After three failed operations in a row the rest are `not-attempted`.
-- Needs rclone v1.70.0 or newer (`backend moveid`). `container-setup.sh` installs v1.76.0 and refuses an older one.
+- Needs the service-account key in the environment (`GDRIVE_SA_JSON_B64`) and `cryptography` or `openssl` to sign the token request.
 
 ## How a hand-off must be worded
 

@@ -238,16 +238,67 @@ class RcloneJson(unittest.TestCase):
         d = ct.RcloneDrive(lambda args, check=True: subprocess.CompletedProcess(args, 0, "null\n", ""))
         self.assertEqual(d.children("any"), [])
 
-    def test_check_names_the_missing_command_and_the_version(self):
+    def test_check_needs_copyid_and_the_api(self):
         import subprocess
-        def rc(args, check=True):
-            if args[:2] == ["backend", "help"]:
-                return subprocess.CompletedProcess(args, 0, "copyid only", "")
-            return subprocess.CompletedProcess(args, 0, "rclone v1.69.1\n- os/version", "")
+        no_copyid = lambda args, check=True: subprocess.CompletedProcess(args, 0, "query only", "")
         with self.assertRaises(RuntimeError) as cm:
-            ct.RcloneDrive(rc).check()
-        self.assertIn("v1.69.1", str(cm.exception))
-        self.assertIn("v1.70.0", str(cm.exception))
+            ct.RcloneDrive(no_copyid, api=object()).check()
+        self.assertIn("copyid", str(cm.exception))
+        has = lambda args, check=True: subprocess.CompletedProcess(args, 0, "copyid query", "")
+        with self.assertRaises(RuntimeError) as cm:
+            ct.RcloneDrive(has, api=None).check()
+        self.assertIn("service-account key", str(cm.exception))
+
+
+class MoveSafety(unittest.TestCase):
+    """The failure that happened: a move that leaves the file in the trash."""
+    class Api:
+        def __init__(self, trashed_after_move=False):
+            self.parents, self.trashed, self.untrashed, self.trash_it = {"f1": ["OLD"]}, False, [], trashed_after_move
+
+        def ensure_path(self, parts):
+            return "DEST"
+
+        def move(self, fid, new, old):
+            self.parents[fid] = [new]
+            self.trashed = self.trash_it
+
+        def get(self, fid):
+            return {"id": fid, "parents": self.parents[fid], "trashed": self.trashed, "md5Checksum": "m"}
+
+        def untrash(self, fid):
+            self.untrashed.append(fid)
+            self.trashed = False
+
+    FILE = {"id": "f1", "parent": "OLD", "path": "x.md"}
+
+    def test_a_clean_move_lands_and_leaves_the_old_folder(self):
+        api = self.Api()
+        d = ct.RcloneDrive(None, api=api)
+        d.move(self.FILE, "Client/Archived/f1abcdef")
+        self.assertTrue(d.lands(self.FILE, "Client/Archived/f1abcdef"))
+        self.assertIsNone(d.still_there(self.FILE))
+
+    def test_a_file_left_trashed_is_restored_and_the_move_reported_as_failed(self):
+        api = self.Api(trashed_after_move=True)
+        d = ct.RcloneDrive(None, api=api)
+        with self.assertRaises(RuntimeError):
+            d.move(self.FILE, "Client/Archived/f1abcdef")
+        self.assertEqual(api.untrashed, ["f1"])
+        self.assertFalse(api.trashed)
+
+    def test_a_trashed_file_is_not_treated_as_still_there(self):
+        api = self.Api()
+        api.trashed = True
+        self.assertIsNone(ct.RcloneDrive(None, api=api).still_there(self.FILE))
+
+    def test_one_failed_readback_stops_the_whole_run(self):
+        files = [F("d%07d" % i, "x%d.md" % i, mime=DOC) for i in range(6)]
+        d = FakeDrive(files)
+        d.lands = lambda f, dest: False                         # every move "succeeds" but cannot be read back
+        r = ct.run("Flo", d, "2026-11-28", do_apply=True)
+        self.assertEqual([x["status"] for x in r["results"]].count("readback-failed"), 1)
+        self.assertEqual(r["not_attempted"], 5)
 
 
 if __name__ == "__main__":

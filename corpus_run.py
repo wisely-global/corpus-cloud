@@ -976,7 +976,8 @@ def cmd_tidy(a):
     is not guessed: it is recorded as a question that names the exact conflict."""
     import corpus_stage as cs
     import corpus_tidy as ct
-    drive = ct.RcloneDrive(cs.rc)
+    import drive_api
+    drive = ct.RcloneDrive(cs.rc, api=drive_api.DriveApi())
     rep = ct.run(a.client, drive, a.today or _nz_today(), do_apply=a.apply, cap=a.cap)
     short = short_of(a.client)
     # Logging needs a run record. Outside a run (a person supervising) the files still move and the report still prints.

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Put one client's KB folder right without a person, wherever the evidence gives a single answer (see POLICY.md).
 
-Everything here MOVES files; nothing is trashed or deleted (rclone has no trash-by-id, and a move is reversible).
-Files are addressed by Drive file id (`rclone backend moveid`), so two files with one name are told apart.
+Everything here MOVES files; nothing is trashed or deleted. A move is a Drive parent change through the API
+(drive_api.py), addressed by Drive file id so two files with one name are told apart. It is NOT `rclone backend
+moveid`: for a native Google Doc that falls back to copy then delete, which trashed three files on 28 Nov 2026.
+After every move the file must be in the destination and not trashed; a file found trashed is restored at once,
+and one failed read-back stops the whole run.
 
 What it does, per client, in this order:
   1. Native Google Docs/Sheets/Slides inside the KB tree move to a sibling folder `Archived from KB <date>/`
@@ -228,8 +231,10 @@ def plan(client, files, read, today):
 
 # ---------------------------------------------------------------- Drive through rclone
 class RcloneDrive:
-    def __init__(self, rc, remote="clients:"):
-        self.rc, self.remote = rc, remote
+    """Lists and reads through rclone; moves through the Drive API (see drive_api.py)."""
+
+    def __init__(self, rc, remote="clients:", api=None):
+        self.rc, self.remote, self.api, self._dest_ids = rc, remote, api, {}
 
     def _json(self, args):
         p = self.rc(args, check=False)
@@ -238,11 +243,13 @@ class RcloneDrive:
         return json.loads(p.stdout or "[]") or []     # rclone 1.76 prints `null` for a folder with no children
 
     def check(self):
-        """Fail before planning, not at the first move, if this rclone cannot move by id."""
+        """Fail before planning, not at the first move, if the tools this needs are missing."""
         p = self.rc(["backend", "help", "drive"], check=False)
-        if "moveid" not in (p.stdout or "") + (p.stderr or ""):
-            v = self.rc(["version"], check=False).stdout.splitlines()[:1]
-            raise RuntimeError("this rclone (%s) has no drive `backend moveid` command; R tidy needs v1.70.0 or newer" % (v[0] if v else "unknown version"))
+        if "copyid" not in (p.stdout or "") + (p.stderr or ""):
+            raise RuntimeError("this rclone has no drive `backend copyid` command (needs a current rclone)")
+        if self.api is None:
+            raise RuntimeError("no Drive API client: moves need the service-account key (GDRIVE_SA_JSON_B64)")
+        self.api._auth()                                          # a bad key or no network fails here, with a reason
 
     def children(self, folder_id):
         out = []
@@ -279,27 +286,23 @@ class RcloneDrive:
             shutil.rmtree(d, ignore_errors=True)
 
     def still_there(self, f):
-        for it in self.children(f["parent"]):
-            if it["id"] == f["id"]:
-                return it
-        return None
-
-    def mkdir(self, path):
-        p = self.rc(["mkdir", self.remote + path], check=False)
-        if p.returncode != 0:
-            raise RuntimeError("mkdir failed: " + (p.stderr or "").strip()[-200:])
+        """The file as it is now if it is still in its planned parent and not trashed, else None."""
+        cur = self.api.get(f["id"])
+        if cur.get("trashed") or f["parent"] not in (cur.get("parents") or []):
+            return None
+        return {"id": cur["id"], "md5Checksum": cur.get("md5Checksum")}
 
     def move(self, f, dest):
-        self.mkdir(dest)
-        p = self.rc(["backend", "moveid", self.remote, f["id"], dest + "/"], check=False)
-        if p.returncode != 0:
-            raise RuntimeError("moveid failed: " + (p.stderr or "").strip()[-200:])
+        dest_id = self._dest_ids.get(dest) or self._dest_ids.setdefault(dest, self.api.ensure_path(dest.split("/")))
+        self.api.move(f["id"], dest_id, f["parent"])
+        cur = self.api.get(f["id"])
+        if cur.get("trashed"):                                    # never leave a file in the trash
+            self.api.untrash(f["id"])
+            raise RuntimeError("the move left the file trashed; it was restored")
 
     def lands(self, f, dest):
-        p = self.rc(["lsjson", self.remote + dest, "--files-only", "--no-modtime"], check=False)
-        if p.returncode != 0:
-            return False
-        return any(e.get("ID") == f["id"] for e in json.loads(p.stdout or "[]"))
+        cur = self.api.get(f["id"])
+        return (not cur.get("trashed")) and (cur.get("parents") or []) == [self._dest_ids.get(dest)]
 
     def put(self, dest_path, content):
         d = tempfile.mkdtemp(prefix="tidy-")
@@ -358,7 +361,10 @@ def apply(drive, ops, cap=DEFAULT_CAP):
                 except Exception as e:  # noqa: BLE001
                     res["status"], res["detail"] = "failed", str(e)[:200]
         results.append(res)
-        streak = streak + 1 if res["status"] in ("failed", "readback-failed") else 0
+        if res["status"] == "readback-failed":
+            streak = STOP_AFTER                                   # the file may not be where we think: stop at once
+        else:
+            streak = streak + 1 if res["status"] == "failed" else 0
     return results
 
 
