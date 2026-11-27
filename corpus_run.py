@@ -306,6 +306,20 @@ def split_top_folders(top):
     return ({n: v[0] for n, v in by_name.items() if len(v) == 1}, {n: v for n, v in by_name.items() if len(v) > 1})
 
 
+def compute_no_corpus(ids, files, dirs):
+    """{folder name: {folder_id, files}} for client folders with no corpus folder and no shadow build under way. `files` are the
+    drive listing's entries outside any corpus folder, `dirs` the client folders' subfolders (two levels). Duplicate-named
+    folders are not in `ids`, so they never appear."""
+    has_kb = {d["Path"].split("/")[0] for d in dirs if d.get("Path", "").endswith("/" + KB)}
+    has_shadow = {d["Path"].split("/")[0] for d in dirs if d.get("Path", "").endswith("/" + KB + " (shadow)")}
+    count = {}
+    for e in files:
+        parts = e["Path"].split("/")
+        if len(parts) >= 2:
+            count[parts[0]] = count.get(parts[0], 0) + 1
+    return {n: {"folder_id": fid, "files": count.get(n, 0)} for n, fid in ids.items() if n not in has_kb and n not in has_shadow}
+
+
 def cmd_discover(a):
     s = state()
     since = parse_iso(s["since"])
@@ -320,6 +334,9 @@ def cmd_discover(a):
     listing = json.loads(p.stdout or "[]")
     changed = [e for e in listing if KB not in e["Path"].split("/")[:-1]]
     pend = [e for e in listing if len(e["Path"].split("/")) == 3 and e["Path"].split("/")[1] == KB]
+    # Every client folder that holds files and has no corpus (nor a shadow build in progress): `R build-requests` files a build for it.
+    dirs2 = json.loads(rclone(["lsjson", "clients:", "-R", "--dirs-only", "--max-depth", "2", "--no-modtime", "--no-mimetype"]).stdout or "[]")
+    save("no_corpus.json", compute_no_corpus(ids, changed, dirs2))
     changes, byc = [], {}
     for e in changed:
         mt = parse_iso(e["ModTime"])
@@ -882,6 +899,80 @@ def cmd_requests(a):
     out({"ok": True, "requested": reqs[:2], "waiting": max(0, len(reqs) - 2)})
 
 
+AI_EMAIL = "ai@wiselyglobal.tech"
+BUILD_REQUEST_CAP = 2
+
+
+def build_request_decision(row, folder_files, has_request, filed, cap=BUILD_REQUEST_CAP, min_files=1):
+    """(file it?, why). The board decides identity (a Client with a Client ID, as `R promote` will also require); the folder
+    must hold real files, so an empty template never becomes an empty corpus; one request per client, ever; a cap per night."""
+    if not row or row.get("stage") != "client":
+        return False, "the Accounts board does not say this is a Client"
+    if not row.get("client_id"):
+        return False, "the Accounts item has no Client ID"
+    if folder_files < min_files:
+        return False, "the folder holds no files (an empty template)"
+    if has_request:
+        return False, "a build request already exists"
+    if filed >= cap:
+        return False, "tonight's cap of %d requests is reached" % cap
+    return True, "ok"
+
+
+def request_keys():
+    """{name_key: status} of every build request on file, by the client name written in it."""
+    import corpus_conflicts as cc
+    out = {}
+    for f in glob.glob(os.path.join(root(), OPS, "corpus-requests", "build-request-*.json")):
+        try:
+            j = json.load(open(f))
+        except Exception:  # noqa: BLE001
+            continue
+        out[cc.name_key(j.get("client"))] = j.get("status")
+    return out
+
+
+def cmd_build_requests(a):
+    """File a corpus build request for every Client on the Accounts board whose Drive folder holds files and has no corpus
+    (POLICY.md, Corpus builds). The nightly builds them into the shadow folder and promotes each when its checks pass; no
+    person approves. Needs `discover` and `stages-from-board` to have run."""
+    import corpus_conflicts as cc
+    import tempfile
+    nc = load("no_corpus.json", None)
+    if nc is None:
+        out({"ok": False, "error": "no_corpus.json missing: run `discover` first"}, 3)
+    stages = load("stages.json", {}) or {}
+    have = request_keys()
+    filed, skipped, considered = [], {}, 0
+    for name, info in sorted(nc.items(), key=lambda kv: -kv[1]["files"]):
+        row = stages.get(name)
+        short = (row or {}).get("short") or name
+        has_req = cc.name_key(short) in have or cc.name_key(name) in have
+        ok, why = build_request_decision(row, info["files"], has_req, len(filed), a.cap)
+        if row and row.get("stage") == "client":
+            considered += 1
+        if not ok:
+            skipped[why] = skipped.get(why, 0) + 1
+            continue
+        note = ("Filed automatically by the nightly run. Accounts board: item %s (Client ID %s), status Client. Drive folder \"%s\" (id %s) holds %d files and no corpus. "
+                "Build into the shadow folder and promote with R promote when its checks pass (POLICY.md, Corpus builds). Sources: Drive and monday; "
+                "Gmail only if a mailbox this task can read holds a Clients label, otherwise record it as not covered."
+                % (row.get("item_id"), row.get("client_id"), name, info["folder_id"], info["files"]))
+        tmp = tempfile.mkdtemp(prefix="breq-")
+        try:
+            rc, d = jpy("sync.py", ["request-build", "--out", tmp, "--client", short, "--by", AI_EMAIL, "--note", note])
+            if rc != 0 or not d.get("file"):
+                out({"ok": False, "error": "request-build failed", "detail": d}, 3)
+            dest = os.path.join(root(), OPS, "corpus-requests")
+            os.makedirs(dest, exist_ok=True)
+            shutil.copy(d["file"], os.path.join(dest, os.path.basename(d["file"])))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        filed.append({"client": short, "folder": name, "files": info["files"]})
+        event("maintainer-note", "%s: build requested automatically (%d files, no corpus, board says Client)" % (short, info["files"]))
+    out({"ok": True, "filed": filed, "skipped": skipped, "clients_checked": considered, "cap": a.cap})
+
+
 PROMOTE_CORE = ("current-state.md", "now.md", "source-manifest.json", "changelog.md")
 
 
@@ -992,7 +1083,10 @@ ADVICE = {
                        "3. Set Account Status to Client, Past Client or Buying process (empty or Prospect is not swept).",
                        '4. Run /sweep "{c}" to confirm it now sweeps']),
     "needs-question": ("The run reached a point that needed a person's judgement.", ['/tidy "{c}"', '/sweep "{c}"']),
-    "no-corpus": ("The client has a Drive folder but no corpus.", ['Ask for a build:  /sweep "{c}"  (offers to create the corpus; never started unattended)']),
+    "no-corpus": ("The client has a Drive folder but no corpus, and no build request is on file. The nightly files one itself for a Client on the Accounts board "
+                  "whose folder holds files, so something is missing: the Accounts item must say Client and have a Client ID, and the folder must hold files.",
+                  ["Check the client's Accounts item: Account Status Client, a Client ID, Client Folder G Drive linked to this folder",
+                   'If that is right, ask for a build now:  /sweep "{c}"  (offers to create the corpus)']),
     "write-failed": ("A write did not complete; the run restored what it had changed.", ['/tidy "{c}"', '/sweep "{c}"']),
     "undo-copy-failed": ("The undo copy could not be made, so nothing was written for this client.", ['Check Drive space and permissions on the client folder', '/sweep "{c}"']),
     "readback": ("A written file did not read back at the size written; the run put the old file back.", ['/tidy "{c}"', '/sweep "{c}"']),
@@ -1053,6 +1147,8 @@ def cmd_advise(a):
     cards = conflict_cards()
     explained = {c["client"] for c in cards if c["kind"] == "duplicate-folders"}
     items = {k: v for k, v in items.items() if not (k[1] == "duplicate-titles" and k[0] in explained)}
+    requested = request_keys()
+    items = {k: v for k, v in items.items() if not (k[1] == "no-corpus" and cc.name_key(k[0]) in requested)}   # a build is on its way
     lines = []
     if items or cards:
         lines += ["How to resolve", FIX_VIA, ""]
@@ -1179,6 +1275,7 @@ def main():
     p.add_argument("--board", default="not-needed", choices=["ok", "failed", "skipped", "not-needed"]); p.set_defaults(f=cmd_record_swept)
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
+    p = sp.add_parser("build-requests"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.set_defaults(f=cmd_build_requests)
     p = sp.add_parser("promote"); p.add_argument("client"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_promote)
     p = sp.add_parser("tidy"); p.add_argument("client"); p.add_argument("--apply", action="store_true")
     p.add_argument("--cap", type=int, default=40); p.add_argument("--today"); p.set_defaults(f=cmd_tidy)
