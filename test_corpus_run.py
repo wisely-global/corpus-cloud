@@ -589,5 +589,54 @@ class BuildRequests(unittest.TestCase):
         self.assertNotIn("no-corpus", buf.getvalue())
 
 
+
+class QueueReconcile(unittest.TestCase):
+    def f(self, *names, native=()):
+        return [{"Path": n, "MimeType": "application/vnd.google-apps.document" if n in native else "text/plain"} for n in names]
+    CORE = ("current-state.md", "source-manifest.json", "changelog.md", "now.md")
+
+    def test_a_mount_mismatch_row_closes_when_drive_has_one_file_per_name(self):
+        self.assertTrue(cr.queue_row_resolved("mount-name-mismatch", self.f(*self.CORE), None, False)[0])
+
+    def test_suffixed_or_duplicate_names_keep_the_row_open(self):
+        self.assertFalse(cr.queue_row_resolved("duplicate-titles", self.f(*self.CORE, "now (1).md"), None, False)[0])
+        self.assertFalse(cr.queue_row_resolved("duplicate-titles", self.f(*self.CORE, "now.md"), None, False)[0])
+
+    def test_two_top_level_folders_keep_the_row_open(self):
+        self.assertFalse(cr.queue_row_resolved("duplicate-titles", self.f(*self.CORE), None, True)[0])
+
+    def test_a_pending_entry_row_closes_when_nothing_is_waiting(self):
+        self.assertTrue(cr.queue_row_resolved("pending-entry", self.f(*self.CORE, "pending-failures.json"), None, False)[0])
+        self.assertFalse(cr.queue_row_resolved("pending-entry", self.f(*self.CORE, "pending-2026-11-17-x.json"), None, False)[0])
+        self.assertFalse(cr.queue_row_resolved("pending-entry", self.f(*self.CORE, "changelog-pending-2026-11-09.md"), None, False)[0])
+
+    def test_stage_unknown_closes_when_the_board_gives_a_stage(self):
+        self.assertTrue(cr.queue_row_resolved("stage-unknown", None, {"stage": "client"}, False)[0])
+        self.assertFalse(cr.queue_row_resolved("stage-unknown", None, {"stage": ""}, False)[0])
+
+    def test_missing_core_and_old_shape(self):
+        self.assertFalse(cr.queue_row_resolved("missing-core", self.f("changelog.md"), None, False)[0])
+        self.assertFalse(cr.queue_row_resolved("old-shape", self.f(*self.CORE, "current-state 2026-10-01.md"), None, False)[0])
+        self.assertTrue(cr.queue_row_resolved("old-shape", self.f(*self.CORE), None, False)[0])
+
+    def test_no_corpus_folder_leaves_the_row_open(self):
+        self.assertFalse(cr.queue_row_resolved("pending-entry", None, None, False)[0])
+
+    def test_alias_rows_resolve_to_their_folder(self):
+        m = cr.folder_lookup({"Barfoot & Thompson", "Mushroom Creative House Pty Ltd"},
+                             [{"short": "Barfoot", "aliases": ["B&T"], "folder_name": "Barfoot & Thompson"},
+                              {"short": "Mushroom CH", "aliases": [], "folder_name": "Mushroom Creative House Pty Ltd"}], {})
+        import corpus_conflicts as cc
+        self.assertEqual(m[cc.name_key("Barfoot")], "Barfoot & Thompson")
+        self.assertEqual(m.get(cc.name_key("Mushroom CH")), "Mushroom Creative House Pty Ltd")
+
+    def test_resolve_prefers_exact_names_and_never_guesses_between_two(self):
+        names = {"Serko", "Serko Ltd.", "Barfoot & Thompson", "Barfield Ltd"}
+        m = cr.folder_lookup(names, [], {})
+        self.assertEqual(cr.resolve_folder("Serko", names, m), "Serko")              # two folders share a key: exact name wins
+        self.assertEqual(cr.resolve_folder("Barfoot", names, m), "Barfoot & Thompson")  # one folder starts with it
+        self.assertIsNone(cr.resolve_folder("Barf", names, m))                       # too short
+        self.assertIsNone(cr.resolve_folder("CMS", names, m))
+
 if __name__ == "__main__":
     unittest.main()

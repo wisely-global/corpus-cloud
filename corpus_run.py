@@ -1032,6 +1032,136 @@ def cmd_seed_client_ids(a):
          "next": "write each client_id to its item with change_item_column_values (only that column), read the echo back, then run `R seed-client-ids --commit ITEM_ID...` for the ones that matched"})
 
 
+RECONCILE_REASONS = ("mount-name-mismatch", "duplicate-titles", "pending-entry", "old-shape", "missing-core", "stage-unknown")
+CORE_FILES = ("current-state.md", "source-manifest.json", "changelog.md")
+KNOWN_STAGES = ("client", "past-client", "prospect")
+
+
+def queue_row_resolved(reason, entries, stage_row, top_duplicate):
+    """(resolved?, why) for one open tidy-queue row, from what the client's folder holds now. `entries` is the recursive
+    `rclone lsjson -R` of its Claude Project Knowledge Base folder (None when there is none). A row is closed only when the
+    live evidence shows the problem is gone; anything else stays open."""
+    if reason == "stage-unknown":
+        st = (stage_row or {}).get("stage")
+        return (True, "the Accounts board now gives stage %s" % st) if st in KNOWN_STAGES else (False, "no stage on the board yet")
+    if top_duplicate:
+        return False, "two top-level folders still share this name"
+    if entries is None:
+        return False, "no corpus folder to check"
+    files = [e for e in entries if not e.get("IsDir")]
+    paths = [e["Path"] for e in files]
+    top = {e["Path"] for e in files if "/" not in e["Path"]}
+    if reason == "missing-core":
+        gone = [c for c in CORE_FILES if c not in top]
+        return (not gone, "core files present" if not gone else "missing " + ", ".join(gone))
+    suffixed = [n for n in paths if re.search(r" \(\d+\)(\.[A-Za-z0-9]+)?$", n)]
+    dupes = [n for n, c in collections_counter(paths).items() if c > 1]
+    native = [e["Path"] for e in files if str(e.get("MimeType", "")).startswith("application/vnd.google-apps")]
+    if reason in ("mount-name-mismatch", "duplicate-titles"):
+        if suffixed or dupes:
+            return False, "still holds %s" % (", ".join((suffixed + dupes)[:3]))
+        if reason == "duplicate-titles" and native:
+            return False, "still holds native Google files: %s" % ", ".join(native[:3])
+        return (all(c in top for c in CORE_FILES), "one Drive file per name, core files present") if all(c in top for c in CORE_FILES) else (False, "core files missing")
+    if reason == "pending-entry":
+        waiting = [n for n in top if (n.startswith("pending-") and n.endswith(".json") and n != "pending-failures.json") or n.startswith("changelog-pending")]
+        return (not waiting, "nothing is waiting to be applied" if not waiting else "still waiting: %s" % ", ".join(sorted(waiting)[:3]))
+    if reason == "old-shape":
+        dated = [n for n in top if re.match(r"current-state[ _-]*\d{4}", n)]
+        ok = "now.md" in top and not dated and not native
+        return (ok, "current shape" if ok else "not yet in the current shape")
+    return False, "not a reason the live check covers"
+
+
+def collections_counter(xs):
+    c = {}
+    for x in xs:
+        c[x] = c.get(x, 0) + 1
+    return c
+
+
+def folder_lookup(folder_names, index_rows, stages):
+    """name_key -> Drive folder name, from the folders themselves, the registry index (short name, aliases) and stages.
+    A key that two different folders claim ('Serko' and 'Serko Ltd.') is dropped: the caller tries the exact folder name first."""
+    import corpus_conflicts as cc
+    claims = {}
+
+    def claim(key, folder):
+        if key:
+            claims.setdefault(key, set()).add(folder)
+    for n in folder_names:
+        claim(cc.name_key(n), n)
+    for r in index_rows:
+        f = r.get("folder_name")
+        if f in folder_names:
+            for k in [r.get("short")] + list(r.get("aliases") or []):
+                claim(cc.name_key(k), f)
+    for f, row in (stages or {}).items():
+        if f in folder_names and row.get("short"):
+            claim(cc.name_key(row["short"]), f)
+    return {k: next(iter(v)) for k, v in claims.items() if len(v) == 1}
+
+
+def resolve_folder(client, folder_names, look):
+    """The Drive folder a queue row's client name means: an exact folder name, else a registry name or alias, else a name that
+    is the start of exactly one known name ('Barfoot' for 'Barfoot & Thompson', at least five letters). Never a guess between two."""
+    import corpus_conflicts as cc
+    if client in folder_names:
+        return client
+    k = cc.name_key(client)
+    if k in look:
+        return look[k]
+    if len(k) >= 5:
+        hits = {f for key, f in look.items() if key.startswith(k)}
+        if len(hits) == 1:
+            return hits.pop()
+    return None
+
+
+def cmd_queue_reconcile(a):
+    """Close every open tidy-queue row whose problem the live Drive folder no longer shows, resolving the row's client by
+    registry alias too (the queue holds 'Barfoot', 'CMS', 'Mushroom CH'). Rows are derived from run records, so a client that
+    nothing changes never gets re-swept and its row would stay open for ever; this is the check that closes it."""
+    import corpus_conflicts as cc
+    qp = os.path.join(runs_dir(), "tidy-queue.json")
+    if not os.path.exists(qp):
+        out({"ok": True, "closed": [], "note": "no tidy queue yet"})
+    q = json.load(open(qp))
+    try:
+        rows = json.load(open(os.path.join(root(), OPS, "corpus-index.json"))).get("clients", [])
+    except Exception:  # noqa: BLE001
+        rows = []
+    stages, dups = load("stages.json", {}) or {}, load("dup_folders.json", {}) or {}
+    top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
+    names = {e["Name"] for e in top}
+    look = folder_lookup(names, rows, stages)
+    today, closed, left = _nz_today(), [], []
+    for key, it in sorted(q.get("items", {}).items()):
+        if it.get("status") != "open" or it.get("reason") not in RECONCILE_REASONS:
+            continue
+        folder = resolve_folder(it.get("client"), names, look)
+        if not folder:
+            left.append({"row": key, "why": "client not found among the Drive folders or the registry"})
+            continue
+        entries = None
+        if it["reason"] != "stage-unknown":
+            p = rclone(["lsjson", "clients:%s/%s" % (folder, KB), "-R", "--files-only", "--no-modtime"])
+            if p.returncode == 0:
+                entries = [{"Path": e["Path"], "MimeType": e.get("MimeType", "")} for e in json.loads(p.stdout or "[]") or []]
+        ok, why = queue_row_resolved(it["reason"], entries, stages.get(folder), folder in dups)
+        if ok:
+            it["status"], it["resolved_on"], it["resolved_by"] = "resolved", today, "live check: " + why
+            closed.append({"row": key, "why": why})
+        else:
+            left.append({"row": key, "why": why})
+    if closed and not a.dry_run:
+        tmp = qp + ".tmp"
+        json.dump(q, open(tmp, "w"), indent=1, sort_keys=True)
+        os.replace(tmp, qp)
+        event("maintainer-note", "tidy queue: %d row(s) closed by the live check (%s)" % (len(closed), "; ".join(c["row"] for c in closed)[:300]))
+    out({"ok": True, "dry_run": bool(a.dry_run), "closed": closed, "left_open": left})
+
+
 PROMOTE_CORE = ("current-state.md", "now.md", "source-manifest.json", "changelog.md")
 
 
@@ -1335,6 +1465,7 @@ def main():
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
     p = sp.add_parser("build-requests"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.set_defaults(f=cmd_build_requests)
+    p = sp.add_parser("queue-reconcile"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_queue_reconcile)
     p = sp.add_parser("seed-client-ids"); p.add_argument("--file"); p.add_argument("--cap", type=int, default=BUILD_REQUEST_CAP); p.add_argument("--commit", nargs="*"); p.set_defaults(f=cmd_seed_client_ids)
     p = sp.add_parser("promote"); p.add_argument("client"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(f=cmd_promote)
     p = sp.add_parser("tidy"); p.add_argument("client"); p.add_argument("--apply", action="store_true")
