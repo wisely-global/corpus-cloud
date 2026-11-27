@@ -269,8 +269,12 @@ def write_pending_watch(pend, ids):
             failfile.add(parts[0])
         else:
             clients.setdefault(parts[0], {"waiting": [], "failed": []})["waiting"].append({"file": parts[2], "since": e["ModTime"][:19] + "Z"})
-    for c in failfile:  # a failure list that is still on Drive is still open
-        clients.setdefault(c, {"waiting": [], "failed": []})["failed"] = old.get(c, {}).get("failed") or ["see pending-failures.json"]
+    for c in failfile:
+        # A failed sync stays put as a pending file, so a failure list is open only while a pending file still waits
+        # beside it. When a tidy folds the sync in by hand and archives the file, nothing rewrites the list; counting
+        # it anyway re-raised the same "failed to apply" line every hour (Service Foods, Sydney Opera House).
+        if clients.get(c, {}).get("waiting"):
+            clients[c]["failed"] = old.get(c, {}).get("failed") or ["see pending-failures.json"]
     os.makedirs(runs_dir(), exist_ok=True)
     json.dump({"updated": now_iso(), "clients": clients}, open(watch_path(), "w"), indent=1)
 

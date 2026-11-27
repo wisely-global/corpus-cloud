@@ -52,7 +52,8 @@ class PendingWatch(unittest.TestCase):
         pend = [{"Path": "Alpha/%s/pending-2026-01-01-a-1.json" % cr.KB, "ModTime": old},
                 {"Path": "Alpha/%s/pending-2026-01-01-b-2.json" % cr.KB, "ModTime": old},
                 {"Path": "Beta/%s/pending-2026-11-24-c-1.json" % cr.KB, "ModTime": new},
-                {"Path": "Gamma/%s/pending-failures.json" % cr.KB, "ModTime": old}]
+                {"Path": "Gamma/%s/pending-failures.json" % cr.KB, "ModTime": old},
+                {"Path": "Gamma/%s/pending-2026-11-24-d-1.json" % cr.KB, "ModTime": new}]   # the failed sync still waits beside its list
         cr.write_pending_watch(pend, {"Alpha": "1", "Beta": "2", "Gamma": "3"})
         text = self.advise()
         self.assertIn("Alpha: 2 waiting", text)
@@ -326,6 +327,29 @@ class IdleDuplicateFolder(unittest.TestCase):
                 pass
         self.assertEqual(recorded, [])
         self.assertIn("idle", events[0][1])
+
+
+class StaleFailureList(unittest.TestCase):
+    def _watch(self, pend):
+        import json, tempfile
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(cr.runs_dir())
+        cr.write_pending_watch(pend, {"A": "idA", "B": "idB"})
+        return json.load(open(cr.watch_path()))["clients"]
+
+    def test_failure_list_with_no_pending_file_beside_it_is_stale(self):
+        kb = "Claude Project Knowledge Base"
+        w = self._watch([{"Path": "A/%s/pending-failures.json" % kb, "ModTime": "2026-11-23T07:13:25Z"}])
+        self.assertEqual(w, {})
+
+    def test_failure_list_with_a_waiting_pending_file_stays_open(self):
+        kb = "Claude Project Knowledge Base"
+        w = self._watch([{"Path": "B/%s/pending-failures.json" % kb, "ModTime": "2026-11-23T07:13:25Z"},
+                         {"Path": "B/%s/pending-2026-11-17-x-1.json" % kb, "ModTime": "2026-11-17T00:55:04Z"}])
+        self.assertTrue(w["B"]["failed"])
+        self.assertEqual(len(w["B"]["waiting"]), 1)
 
 
 if __name__ == "__main__":
