@@ -76,6 +76,10 @@ def patch_unattended(skill):
     if "swept_at = {}" in s:
         print("already applied")
         return 0
+    if "last_swept = {}" in s and "fixed by a later run" in s:
+        # The released skill (13.12 or later) settles failures swept by a later run itself (CR-2): the fix is upstream.
+        print("fixed upstream: nothing to patch")
+        return 0
     if any(s.count(old) != 1 for old, _ in UNATT_EDITS):
         print("unattended.py is not the version the patch was written for; not patched", file=sys.stderr)
         return 3
