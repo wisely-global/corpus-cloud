@@ -56,6 +56,40 @@ So moves and cleanups of existing files go through `R tidy` and the service acco
   and `problems`. After three failed operations in a row the rest are `not-attempted`.
 - Needs the service-account key in the environment (`GDRIVE_SA_JSON_B64`) and `cryptography` or `openssl` to sign the token request.
 
+## Corpus builds: staging, not approval
+
+A build for a client that has no corpus is Tier 1: nothing exists to overwrite, so there is nothing for a person to
+protect, and the facts a reviewer could add (is this the right client, the right folder, a client at all) are already
+decided by the Accounts board (Client status, Client ID, the folder link). The build is created in the shadow folder
+only because that is **staging**: a half-built corpus never appears as the live one. It goes live with `R promote`, a
+Drive folder rename (metadata only, atomic, every file id kept), when all of these hold:
+
+- the skill's promote checks pass: the four core files exist, the manifest parses, `current-state.md` has a Version line,
+  both hot files are within budget, and no live corpus exists to overwrite;
+- the Accounts board says the client is a **Client** and the item has a Client ID.
+
+If a check fails the shadow stays and the run retries next night; the failing check is named. People review the facts
+in the corpus when they use it (corrections go in `corrections-log.md`), not the build process.
+
+## Conflict cards
+
+A hand-off is a **card**, derived fresh from the live board and Drive on every run (`R stages-from-board` writes
+`corpus-runs/conflicts.json`, `R advise` prints it). A card disappears the moment the conflict is fixed, so there is
+nothing to close and no stale row. Every card carries:
+
+1. **What conflicts**, in one sentence.
+2. **The facts side by side**, each with its link: both Accounts items (status, Client ID, short name, created date)
+   and the Drive folder each points at (file count, corpus present or not, newest change, empty template or not), or
+   both folders and which one the board links.
+3. **What it blocks**, and what it does not (nothing is lost; which client is not swept).
+4. **The exact question**, answerable in a word.
+5. **What to do for each answer**, as steps.
+6. **What happens next**, and when the card goes away.
+
+Built: duplicate Accounts items for one client (`Serko` and `Serko Ltd.`), two top-level Drive folders with one name,
+and an Account Status label the runs do not know. The last asks what the label means; a person answers by adding it to
+`status-map.json` in Wisely Shared Config (`{"Customer": "client"}`), and the next run reads it.
+
 ## How a hand-off must be worded
 
 "Needs a person" on its own is a defect. A hand-off states:
@@ -80,9 +114,11 @@ status), that is a missing fact and goes to a person, with the steps above.
 
 | Built | Not yet built |
 |---|---|
-| `R tidy`: native Google files, same-path duplicates (identical, superset, clean JSON merge), dated history | Choosing between two top-level client folders of one name by the board's folder link (needs staging by folder id instead of by name; `discover` currently skips such a client as `duplicate-titles` only when work is blocked) |
-| Stale queue rows for a failure list with nothing pending | Resolving queue rows by registry alias, and clearing rows when a tidy finishes |
-| Re-runnable `finish`, retried read-back on push | Pointer repair when a file a manifest row names has moved |
+| `R tidy`: native Google files, same-path duplicates (identical, superset, clean JSON merge), dated history | Choosing between two top-level client folders of one name by the board's folder link (needs staging by folder id instead of by name); today it is a conflict card |
+| Conflict cards: duplicate Accounts items, duplicate top-level folders, unknown Account Status | Merging the contents of two Accounts items or two folders (a person does it, from the card's steps) |
+| `R promote`: shadow corpus goes live by atomic rename after the checks and the board identity check | Verified end to end on a real build (the first one is OneNZ) |
+| Live check in `R maintenance`: a queue row whose problem is gone is reported as already resolved | Resolving queue rows by registry alias, and clearing rows when a tidy finishes |
+| Stale queue rows for a failure list with nothing pending; re-runnable `finish`; retried read-back on push | Pointer repair when a file a manifest row names has moved |
 | | Collapsing duplicate **core** files, and current-state forks (flagged today) |
 | | Text (non-JSON) merges beyond "one contains the other" |
 | | Expiring old undo folders: the nightly trashes them through the connector, but rclone creates them, so the connector probably cannot (not yet seen to fail; the first expiry will show it). They should be moved by `R tidy`-style moves instead. |

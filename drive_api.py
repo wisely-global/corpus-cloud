@@ -4,7 +4,7 @@
 Why this exists: `rclone backend moveid` cannot move a native Google Doc server-side. It falls back to copy then
 delete, and the delete trashes the original while the copy never arrives (seen on Flo & Frankie, 28 Nov 2026).
 A Drive parent change (`files.update` with addParents/removeParents) is metadata only, works for every file type,
-and is what the Drive UI does. Nothing here deletes or trashes; `untrash` exists only to undo a trashing.
+and is what the Drive UI does. Nothing here deletes or trashes; `untrash` exists only to undo a trashing, and `rename` is how a shadow corpus goes live.
 
 Key: GDRIVE_SA_JSON_B64 (or GDRIVE_SA_JSON), the same key rclone uses. It is held in memory only and never printed.
 Needs `cryptography`, or the `openssl` command, to sign the token request.
@@ -98,6 +98,10 @@ class DriveApi:
         url = "%s/%s?supportsAllDrives=true&addParents=%s&removeParents=%s&fields=%s" % (
             API, urllib.parse.quote(fid), urllib.parse.quote(new_parent), urllib.parse.quote(old_parent), FIELDS)
         return self._call("PATCH", url, {})
+
+    def rename(self, fid, name):
+        """Rename a file or folder. Metadata only, so it is atomic and every id inside is kept (promoting a shadow corpus)."""
+        return self._call("PATCH", "%s/%s?supportsAllDrives=true&fields=%s" % (API, urllib.parse.quote(fid), FIELDS), {"name": name})
 
     def untrash(self, fid):
         return self._call("PATCH", "%s/%s?supportsAllDrives=true&fields=%s" % (API, urllib.parse.quote(fid), FIELDS), {"trashed": False})

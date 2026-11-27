@@ -7,10 +7,11 @@ what changed goes back.
 | File | Purpose |
 |---|---|
 | `corpus_stage.py` | `setup`, `pull`, `status`, `push`. Pull copies the folders a run needs and snapshots them. Push sends back only changed or new files, refuses any file that changed on Drive since the pull, never deletes (the one removal is sending an already-applied pending sync's original to the Drive trash after its archive copy is verified), and reads every file back by size. |
-| `corpus_run.py` | The mechanics of a run, as subcommands that print JSON: `begin [--mode changed\|nightly]`, `discover`, `stages-from-board`, `plan`, `apply-pending`, `undo`, `record-swept`, `wrap`, `finish`; nightly adds `maintenance` and `requests`. |
+| `corpus_run.py` | The mechanics of a run, as subcommands that print JSON: `begin [--mode changed\|nightly]`, `discover`, `stages-from-board`, `plan`, `apply-pending`, `undo`, `record-swept`, `wrap`, `tidy`, `finish`; nightly adds `maintenance`, `requests`, `shadow` and `promote`. |
 | `cc-env.sh` | Source it first in every shell command of a run. Finds the repo wherever it is checked out (`/work/corpus-cloud`, `/home/user/corpus-cloud`, `~/corpus-cloud`) and sets `CC`, `PATH`, `STAGE_ROOT` and `GMAIL_SWEEP`. |
 | `corpus_tidy.py` | `R tidy CLIENT [--apply]`: puts a client's KB folder right wherever the evidence gives one answer. Moves only, by Drive file id through the Drive API (`drive_api.py`; not rclone, whose move of a native Google file trashes it), never trashes. Native Google files leave the KB tree, duplicates are kept or merged when they do not conflict, dated history goes to `archive/`; a real conflict is reported with the exact question. Dry run by default. |
 | `drive_api.py` | The few Drive API calls `R tidy` needs (parent change, folder lookup and creation, undo of a trashing), as the service account. |
+| `corpus_conflicts.py` | Conflict cards (duplicate Accounts items, duplicate top-level folders, unknown Account Status): detection, rendering, `first_seen`. Written to `corpus-runs/conflicts.json` by `stages-from-board`, printed by `advise`. |
 | `POLICY.md` | What the unattended runs decide themselves and what they hand to a person, and how a hand-off must be worded. |
 | `slack_notify.py` | Posts one alert to the corpus Slack channel as the Slack app (bot), not as a person. The bot token is a Network secret on host `slack.com`; the script sends no token. `--check` runs `auth.test` and posts nothing. |
 | `container-setup.sh` | Idempotent. Installs rclone (pinned, checksum-verified) if missing and proves both shared drives are readable. Put it in the environment's setup script. |
@@ -21,6 +22,7 @@ what changed goes back.
 | `permissions.example.json` | Pre-approval list for unattended sessions (allow the run's commands and connector tools, deny anything that deletes or drafts mail). Review before use. |
 | `test_corpus_run.py` | Unit tests for the helpers in `corpus_run.py`. |
 | `test_drive_api.py` | Unit tests for `drive_api.py` (a fake HTTP layer stands in for Google). |
+| `test_corpus_conflicts.py` | Unit tests for the conflict cards, using the Serko and Mossop cases. |
 | `test_corpus_tidy.py` | Unit tests for `corpus_tidy.py` (a fake Drive stands in for rclone). |
 | `test_corpus_stage.sh` | Offline test (two local folders stand in for the shared drives). Run it after any change to `corpus_stage.py`. |
 | `patches/` | Fixes to the installed client-corpus skill (applied by `apply_skill_patches.py`) that belong in the skill library source (`Chris Skills/Skill Sources/`): `sync-last-sweep`. Each patch is skipped once the installed skill carries the fix itself, so a newer skill release never fails container setup. The daily-digest fix (a failure or dropped flag for a client a later run swept) is upstream as of skill 13.12.0 and no longer patched. |
@@ -50,6 +52,9 @@ Python 3 and curl are used; the client-corpus skill must be synced into the envi
 
 ## Settings
 
+`status-map.json` (optional, in Wisely Shared Config): `{"Customer": "client"}` tells the runs how to read an Account Status label they do not know (`client`, `past-client` or `prospect`). It is how a person answers an unknown-status card.
+
+
 `GMAIL_SWEEP` (`on`/`off`, default `off`): the service account's mailbox holds no `Clients/*` labels, so Gmail is not swept by these runs. Client email reaches the corpus through people's own `/sweep` sessions, which file pending syncs that the hourly run applies.
 
 ## Tests
@@ -58,6 +63,7 @@ Python 3 and curl are used; the client-corpus skill must be synced into the envi
 bash test_corpus_stage.sh
 python3 test_corpus_run.py
 python3 test_corpus_tidy.py
+python3 test_corpus_conflicts.py
 python3 test_drive_api.py
 python3 test_slack_notify.py
 ```

@@ -72,6 +72,13 @@ class Api(unittest.TestCase):
     def test_a_quote_in_a_folder_name_is_escaped(self):
         self.assertEqual(da._q("Kid's \\ x"), "Kid\\'s \\\\ x")
 
+    def test_rename_is_metadata_only(self):
+        f = Fake()
+        da.DriveApi("DRIVE", f).rename("FOLDER", "Claude Project Knowledge Base")
+        method, url, body = f.calls[0]
+        self.assertEqual((method, body), ("PATCH", {"name": "Claude Project Knowledge Base"}))
+        self.assertNotIn("addParents", url)
+
     def test_no_key_is_a_clear_error(self):
         os.environ.pop("GDRIVE_SA_JSON")
         with self.assertRaises(RuntimeError):
