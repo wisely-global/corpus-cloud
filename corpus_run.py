@@ -825,11 +825,13 @@ ADVICE = {
                   ['/tidy "{c}"   (runs the migration from references/corpus-migration.md)', '/sweep "{c}"']),
     "over-budget": ("current-state.md or now.md is over its size ceiling, so new material cannot be folded in.",
                     ['/tidy "{c}"   (shows what moves where; the nightly run also demotes automatically)', '/sweep "{c}"']),
-    "stage-unknown": ("No usable stage was found for this client, so it is not swept. Clients are matched to the Accounts board by the folder id in the item's Client Folder G Drive link, "
-                      "so either Account Status is empty, or that link points at a different folder than the client's Drive folder.",
-                      ["Open the client's Accounts board item: Client Folder G Drive must link to the client's own Drive folder (the one holding Claude Project Knowledge Base)",
-                       "Account Status must be Client, Past Client or Buying process",
-                       '/sweep "{c}"']),
+    "stage-unknown": ("The run could not determine this client's stage, so it is not swept. It looks the client up on the Accounts board "
+                      "by the folder id in the item's Client Folder G Drive link; no item with that folder id, or no Account Status, means no stage. "
+                      "The board is the authority for stage, and a person must supply what it lacks.",
+                      ["1. In monday (wiselyglobal, Accounts board) find the client's item. If there is none, create one.",
+                       "2. Set Client Folder G Drive to the client's own folder in Consulting | Clients (the one that contains Claude Project Knowledge Base). A link to any other folder leaves the client unmatched.",
+                       "3. Set Account Status to Client, Past Client or Buying process (empty or Prospect is not swept).",
+                       '4. Run /sweep "{c}" to confirm it now sweeps']),
     "needs-question": ("The run reached a point that needed a person's judgement.", ['/tidy "{c}"', '/sweep "{c}"']),
     "no-corpus": ("The client has a Drive folder but no corpus.", ['Ask for a build:  /sweep "{c}"  (offers to create the corpus; never started unattended)']),
     "write-failed": ("A write did not complete; the run restored what it had changed.", ['/tidy "{c}"', '/sweep "{c}"']),
@@ -960,6 +962,27 @@ def cmd_finish(a):
     out(res, 0 if res["ok"] else 3)
 
 
+def cmd_tidy(a):
+    """Put one client's KB folder right wherever the evidence gives one answer (policy: POLICY.md). Dry run unless --apply.
+    Moves only (native Google files out of the KB tree, duplicates, dated history); a real disagreement between two copies
+    is not guessed: it is recorded as a question that names the exact conflict."""
+    import corpus_stage as cs
+    import corpus_tidy as ct
+    drive = ct.RcloneDrive(cs.rc)
+    rep = ct.run(a.client, drive, a.today or datetime.now(timezone.utc).strftime("%Y-%m-%d"), do_apply=a.apply, cap=a.cap)
+    short = short_of(a.client)
+    if rep["applied"]:
+        event("maintainer-note", "%s: tidy: moved %d, wrote %d, flagged %d, deferred %d" % (
+            short, rep.get("moved", 0), rep.get("written", 0), len(rep["flags"]), rep.get("deferred", 0)))
+    if a.apply:
+        for fl in rep["flags"][:3]:
+            event("maintainer-note", "%s: needs-question: %s" % (short, fl["question"]))
+        if rep["flags"]:
+            record_client(short, "skipped", "needs-question", "drive")
+    bad = bool(rep.get("problems"))
+    out({"ok": not bad, **rep}, 3 if bad else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -978,6 +1001,8 @@ def main():
     p.add_argument("--board", default="not-needed", choices=["ok", "failed", "skipped", "not-needed"]); p.set_defaults(f=cmd_record_swept)
     p = sp.add_parser("wrap"); p.add_argument("client"); p.add_argument("--item-id"); p.set_defaults(f=cmd_wrap)
     p = sp.add_parser("advise"); p.add_argument("--run"); p.add_argument("--hours", type=float, default=24); p.set_defaults(f=cmd_advise)
+    p = sp.add_parser("tidy"); p.add_argument("client"); p.add_argument("--apply", action="store_true")
+    p.add_argument("--cap", type=int, default=40); p.add_argument("--today"); p.set_defaults(f=cmd_tidy)
     p = sp.add_parser("finish"); p.add_argument("--no-push", action="store_true"); p.set_defaults(f=cmd_finish)
     a = ap.parse_args()
     if getattr(a, "client", None):
