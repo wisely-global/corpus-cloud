@@ -477,5 +477,98 @@ class CustomerStatus(unittest.TestCase):
         self.assertEqual(cr._status_of("Customer", {"Customer": "client"}), "client")
 
 
+class BuildRequests(unittest.TestCase):
+    CLIENT = {"stage": "client", "client_id": "CL-0195", "short": "One New Zealand", "item_id": "2704765722"}
+
+    def test_a_client_with_files_and_no_request_gets_one(self):
+        self.assertEqual(cr.build_request_decision(self.CLIENT, 6, False, 0), (True, "ok"))
+
+    def test_the_board_decides_identity(self):
+        self.assertFalse(cr.build_request_decision(None, 6, False, 0)[0])
+        self.assertFalse(cr.build_request_decision({"stage": "prospect", "client_id": "CL-1"}, 6, False, 0)[0])
+        self.assertFalse(cr.build_request_decision({"stage": "client", "client_id": None}, 6, False, 0)[0])
+
+    def test_an_empty_template_folder_never_becomes_an_empty_corpus(self):
+        ok, why = cr.build_request_decision(self.CLIENT, 0, False, 0)
+        self.assertFalse(ok)
+        self.assertIn("empty template", why)
+
+    def test_one_request_per_client_and_a_cap_per_night(self):
+        self.assertFalse(cr.build_request_decision(self.CLIENT, 6, True, 0)[0])
+        self.assertFalse(cr.build_request_decision(self.CLIENT, 6, False, 2)[0])
+        self.assertTrue(cr.build_request_decision(self.CLIENT, 6, False, 1)[0])
+
+    def test_compute_no_corpus_finds_folders_with_files_and_no_kb_or_shadow(self):
+        ids = {"OneNZ": "id1", "Serko": "id2", "NewCo": "id3", "Empty": "id4"}
+        files = [{"Path": "OneNZ/a.pdf"}, {"Path": "OneNZ/Commercials/b.pdf"}, {"Path": "Serko/x.docx"}, {"Path": "NewCo/y.pdf"}]
+        dirs = [{"Path": "Serko/" + cr.KB}, {"Path": "NewCo/" + cr.KB + " (shadow)"}, {"Path": "OneNZ/Commercials"}]
+        nc = cr.compute_no_corpus(ids, files, dirs)
+        self.assertEqual(set(nc), {"OneNZ", "Empty"})            # Serko has a corpus, NewCo a shadow build under way
+        self.assertEqual(nc["OneNZ"]["files"], 2)
+        self.assertEqual(nc["Empty"]["files"], 0)
+
+    def _run(self, nc, stages, existing=()):
+        import json, tempfile, io, contextlib, argparse
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(os.path.join(tmp, cr.OPS, "corpus-requests"))
+        cr.save("no_corpus.json", nc)
+        cr.save("stages.json", stages)
+        for name in existing:
+            json.dump({"client": name, "status": "requested"}, open(os.path.join(tmp, cr.OPS, "corpus-requests", "build-request-x-2026-11-01.json"), "w"))
+        events = []
+
+        def fake_jpy(script, args):
+            d = args[args.index("--out") + 1]
+            f = os.path.join(d, "build-request-%s.json" % args[args.index("--client") + 1].lower().replace(" ", "-"))
+            json.dump({"client": args[args.index("--client") + 1], "status": "requested", "note": args[args.index("--note") + 1]}, open(f, "w"))
+            return 0, {"ok": True, "file": f}
+        buf = io.StringIO()
+        with mock.patch.object(cr, "jpy", fake_jpy), mock.patch.object(cr, "event", lambda k, d: events.append(d)), contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_build_requests(argparse.Namespace(cap=2))
+            except SystemExit:
+                pass
+        return json.loads(buf.getvalue()), tmp, events
+
+    def test_the_command_files_requests_for_clients_only_and_is_idempotent(self):
+        nc = {"OneNZ": {"folder_id": "f1", "files": 6}, "Empty": {"folder_id": "f2", "files": 0}, "Prosp": {"folder_id": "f3", "files": 9}}
+        stages = {"OneNZ": dict(self.CLIENT), "Empty": {"stage": "client", "client_id": "CL-2", "short": "Empty"}, "Prosp": {"stage": "prospect", "client_id": "CL-3"}}
+        r, tmp, events = self._run(nc, stages)
+        self.assertEqual([f["client"] for f in r["filed"]], ["One New Zealand"])
+        self.assertTrue(os.path.exists(os.path.join(tmp, cr.OPS, "corpus-requests", "build-request-one-new-zealand.json")))
+        self.assertEqual(len(events), 1)
+        r2, _, _ = self._run(nc, stages, existing=["One New Zealand"])          # now a request is on file
+        self.assertEqual(r2["filed"], [])
+        self.assertIn("a build request already exists", r2["skipped"])
+
+    def test_the_cap_limits_a_night(self):
+        nc = {"A": {"folder_id": "1", "files": 5}, "B": {"folder_id": "2", "files": 4}, "C": {"folder_id": "3", "files": 3}}
+        stages = {n: {"stage": "client", "client_id": "CL-" + n, "short": n} for n in nc}
+        r, _, _ = self._run(nc, stages)
+        self.assertEqual(len(r["filed"]), 2)
+        self.assertEqual(r["skipped"], {"tonight's cap of 2 requests is reached": 1})
+
+    def test_a_client_with_a_request_on_file_is_not_reported_as_needing_a_person(self):
+        import json, tempfile, io, contextlib, argparse
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(os.path.join(tmp, cr.OPS, "corpus-requests"))
+        os.makedirs(cr.runs_dir())
+        json.dump({"client": "One New Zealand", "status": "requested"}, open(os.path.join(tmp, cr.OPS, "corpus-requests", "build-request-x.json"), "w"))
+        rec = {"run_id": "run-1", "started": cr.now_iso(), "clients": [{"client": "One New Zealand", "outcome": "skipped", "reason": "no-corpus"}], "events": []}
+        open(os.path.join(cr.runs_dir(), "run-1.md"), "w").write("# r\n<!-- run-data: %s -->\n" % json.dumps(rec))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_advise(argparse.Namespace(run=None, hours=24))
+            except SystemExit:
+                pass
+        self.assertNotIn("no-corpus", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
