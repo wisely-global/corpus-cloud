@@ -177,7 +177,9 @@ class DigestResolvedFailures(unittest.TestCase):
         self.assertEqual(d["status"], "ok")
         self.assertNotIn("Failed clients", d["text"])
         self.assertNotIn("Dropped after three", d["text"])
-        self.assertIn("swept since (nothing to do): Atlantic", d["text"])
+        # patched wording, or the skill's own wording from 13.12.0 on
+        self.assertTrue("swept since (nothing to do): Atlantic" in d["text"]
+                        or "fixed by a later run (no action):\n- Atlantic" in d["text"], d["text"])
 
     def test_unresolved_failure_still_listed(self):
         d = self.digest([[self.row("Atlantic", "swept")],
