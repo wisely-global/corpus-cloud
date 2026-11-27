@@ -14,7 +14,10 @@ Kinds:
 import re
 
 LEGAL = {"ltd", "limited", "pty", "inc", "incorporated", "llc", "plc", "nz", "au", "co", "company", "the", "group", "holdings"}
-KNOWN_STATUS = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect"}
+# "Customer" is a won deal awaiting onboarding (owner, 2026-11-28): not delivering yet, so it is read as a prospect
+# (not swept, not built, no card) until the status becomes Client.
+KNOWN_STATUS = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect", "Customer": "prospect"}
+STATUS_MEANING = {"Customer": "a won deal awaiting onboarding"}
 KB = "Claude Project Knowledge Base"
 STAGES = ("client", "past-client", "prospect")
 FOLDER = "application/vnd.google-apps.folder"
@@ -24,6 +27,12 @@ def name_key(name):
     """'Serko Ltd.' and 'Serko' are one key; 'Tegel Foods Ltd' and 'Tegel' are not (Foods is not a legal suffix)."""
     toks = [t for t in re.sub(r"[^a-z0-9 ]", " ", (name or "").lower()).split() if t not in LEGAL]
     return "".join(toks)
+
+
+def status_text(label):
+    if not label:
+        return "none"
+    return "%s (%s)" % (label, STATUS_MEANING[label]) if label in STATUS_MEANING else label
 
 
 def folder_url(fid):
@@ -95,7 +104,7 @@ def card_duplicate_accounts(group, facts_by_folder, folder_created):
         reg = "registered (Client ID %s, short name %s)" % (it["client_id"], it["short"]) if it["client_id"] else "not registered (no Client ID, no short name)"
         fid = it["folder_id"]
         return "%s. Accounts item \"%s\" (%s) | status %s | %s | created %s | Drive folder %s | %s" % (
-            letter, it["name"], item_url(it), it["status"] or "none", reg, it["created"] or "unknown",
+            letter, it["name"], item_url(it), status_text(it["status"]), reg, it["created"] or "unknown",
             folder_url(fid) if fid else "none linked", describe_folder(facts_by_folder.get(fid)) if fid else "no folder")
     canon = [i for i in group if i["client_id"]]
     facts = [line(chr(65 + n), it) for n, it in enumerate(group)]
@@ -109,6 +118,7 @@ def card_duplicate_accounts(group, facts_by_folder, folder_created):
         answers.append({"if": "they are the same organisation",
                         "do": ["In the Accounts board, move anything worth keeping from %s onto \"%s\" (contacts, opportunities), then archive %s." % (
                                    ", ".join('"%s"' % o["name"] for o in others), real["name"], ", ".join('"%s"' % o["name"] for o in others)),
+                               "A status of Customer means a won deal awaiting onboarding: if that deal is real work for this client, record it on \"%s\" so onboarding follows from the existing client." % real["name"],
                                "In the Clients drive, remove the unused folder(s): " + ", ".join(folder_url(o["folder_id"]) for o in others if o["folder_id"])
                                + " (the runs never delete; this is a manual move to trash)."]})
         answers.append({"if": "they are different organisations",

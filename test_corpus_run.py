@@ -468,5 +468,14 @@ class Promote(unittest.TestCase):
         self.assertIn("the Accounts item has no Client ID", self.problems(stage_row={"stage": "client", "client_id": None}))
 
 
+class CustomerStatus(unittest.TestCase):
+    def test_customer_reads_as_a_prospect_so_it_is_neither_swept_nor_built(self):
+        self.assertEqual(cr._status_of("Customer"), "prospect")
+        self.assertEqual(cr._status_of("Client"), "client")
+
+    def test_a_status_map_entry_still_overrides(self):
+        self.assertEqual(cr._status_of("Customer", {"Customer": "client"}), "client")
+
+
 if __name__ == "__main__":
     unittest.main()

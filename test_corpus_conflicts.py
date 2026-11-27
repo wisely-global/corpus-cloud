@@ -31,15 +31,20 @@ class Detect(unittest.TestCase):
         self.assertEqual(len(g), 1)
         self.assertEqual({i["name"] for i in g[0]}, {"Serko", "Serko Ltd."})
 
-    def test_unknown_status_is_named_with_its_items(self):
+    def test_customer_is_a_known_status_not_a_conflict(self):
         items = cc.parse_items(SERKO + [raw("3", "Arnott's", "Customer", None, None, "1P")])
+        self.assertEqual(cc.unknown_statuses(items), {})
+        self.assertEqual(cc.KNOWN_STATUS["Customer"], "prospect")      # a won deal awaiting onboarding: not delivering yet
+
+    def test_an_unknown_status_is_named_with_its_items(self):
+        items = cc.parse_items(SERKO + [raw("3", "Arnott's", "Dormant", None, None, "1P"), raw("4", "TMR", "Dormant", None, None, "1Q")])
         u = cc.unknown_statuses(items)
-        self.assertEqual(list(u), ["Customer"])
-        self.assertEqual(len(u["Customer"]), 2)
+        self.assertEqual(list(u), ["Dormant"])
+        self.assertEqual(len(u["Dormant"]), 2)
 
     def test_a_status_map_entry_silences_it(self):
-        items = cc.parse_items(SERKO)
-        self.assertEqual(cc.unknown_statuses(items, {"Customer": "client"}), {})
+        items = cc.parse_items([raw("3", "Arnott's", "Dormant", None, None, "1P")])
+        self.assertEqual(cc.unknown_statuses(items, {"Dormant": "past-client"}), {})
 
     def test_an_unreadable_status_is_reported_not_ignored(self):
         items = cc.parse_items([raw("4", "Mitre 10", {"changed_at": "x", "index": 5})])
@@ -57,6 +62,7 @@ class Cards(unittest.TestCase):
         self.assertIn("https://x.monday.com/pulses/2909492020", text)
         self.assertIn("registered (Client ID CL-0071", text)
         self.assertIn("not registered (no Client ID", text)
+        self.assertIn("status Customer (a won deal awaiting onboarding)", text)
         self.assertIn("https://drive.google.com/drive/folders/1G9kaFT", text)
         self.assertIn("empty template folder", text)
         self.assertIn("44 files in the folder tree", text)
@@ -68,6 +74,7 @@ class Cards(unittest.TestCase):
         self.assertTrue(c["question"].endswith("same organisation?"))
         self.assertEqual([a["if"] for a in c["answers"]], ["they are the same organisation", "they are different organisations"])
         self.assertIn("archive", " ".join(c["answers"][0]["do"]))
+        self.assertIn("won deal awaiting onboarding", " ".join(c["answers"][0]["do"]))
         self.assertTrue(c["after"])
 
     def test_duplicate_folders_card_says_which_one_the_board_links(self):
