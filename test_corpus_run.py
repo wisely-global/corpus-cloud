@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for the pure helpers in corpus_run.py. Run: python3 test_corpus_run.py"""
-import os, sys, unittest
+import json, os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_run as cr
 
@@ -367,6 +367,9 @@ class TidyWiring(unittest.TestCase):
         rep = {"client": "A", "files_seen": 3, "planned": 0, "ops": [], "applied": True, "moved": 2, "written": 0, "deferred": 0, "problems": [],
                "flags": [{"path": "m.json", "kind": "conflict", "question": "m.json exists twice and the copies disagree: $.x is 1 and 2. Which is right?"}]}
         events, recorded = [], []
+        import tempfile
+        os.environ["CORPUS_WORK"] = tempfile.mkdtemp()
+        cr.save("run.json", {"run_id": "r"})                      # a run is active, so the run record is written
         with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc: None), \
              mock.patch.object(cr, "event", lambda k, d: events.append(d)), \
              mock.patch.object(cr, "record_client", lambda *a, **k: recorded.append(a)), \
@@ -377,6 +380,25 @@ class TidyWiring(unittest.TestCase):
                 self.assertEqual(e.code, 0)
         self.assertTrue(any("needs-question: m.json" in e for e in events))
         self.assertEqual(recorded, [("A", "skipped", "needs-question", "drive")])
+
+
+    def test_apply_outside_a_run_still_reports_and_does_not_abort(self):
+        import argparse, io, tempfile, contextlib
+        from unittest import mock
+        import corpus_tidy as ct
+        os.environ["CORPUS_WORK"] = tempfile.mkdtemp()           # no run.json here
+        rep = {"client": "A", "files_seen": 1, "planned": 1, "ops": [], "applied": True, "moved": 1, "written": 0, "deferred": 0, "problems": [], "flags": []}
+        buf = io.StringIO()
+        with mock.patch.object(ct, "run", lambda *a, **k: rep), mock.patch.object(ct, "RcloneDrive", lambda rc: None), \
+             mock.patch.object(cr, "short_of", lambda c: "A"), contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_tidy(argparse.Namespace(client="A", apply=True, cap=40, today="2026-11-28"))
+            except SystemExit as e:
+                self.assertEqual(e.code, 0)
+        out = json.loads(buf.getvalue())
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["moved"], 1)
+        self.assertFalse(out["logged_to_run"])
 
     def test_dry_run_records_nothing(self):
         import argparse
