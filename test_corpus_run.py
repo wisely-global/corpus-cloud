@@ -177,16 +177,19 @@ class DigestResolvedFailures(unittest.TestCase):
         self.assertEqual(d["status"], "ok")
         self.assertNotIn("Failed clients", d["text"])
         self.assertNotIn("Dropped after three", d["text"])
-        self.assertIn("swept since (nothing to do): Atlantic", d["text"])
+        # settled clients are named once as fixed: 13.10 patch wording "swept since (nothing to do)", 13.12 "fixed by a later run (no action)"
+        self.assertTrue("nothing to do" in d["text"] or "no action" in d["text"], d["text"])
+        self.assertIn("Atlantic", d["text"])
 
     def test_unresolved_failure_still_listed(self):
         d = self.digest([[self.row("Atlantic", "swept")],
                          [self.row("Atlantic", "failed", "write-failed", ["dropped-after-retries"]), self.row("Other", "failed", "write-failed")]])
         self.assertEqual(d["status"], "needs-you")
         self.assertIn("Atlantic: failed: write-failed", d["text"])
-        self.assertIn("Dropped after three failed attempts", d["text"])
+        self.assertIn("dropped", d["text"].lower())
         self.assertIn("Other: failed", d["text"])
         self.assertNotIn("swept since", d["text"])
+        self.assertNotIn("no action", d["text"])
 
 
 class DuplicateTopFolders(unittest.TestCase):
@@ -228,6 +231,30 @@ class StageUnknownAdvice(unittest.TestCase):
         self.assertIn("Client Folder G Drive", meaning)
         self.assertTrue(any("Client Folder G Drive" in c for c in cmds))
         self.assertTrue(any("{c}" in c for c in cmds))
+
+
+class InterruptedAdvice(unittest.TestCase):
+    def test_interrupted_run_does_not_get_connector_advice(self):
+        import tempfile, json, io, contextlib
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(cr.runs_dir())
+        rec = {"schema": 1, "run_id": "run-20261127-0100", "mode": "changed", "target": "live", "status": "complete",
+               "started": cr.now_iso(), "ended": cr.now_iso(), "clients": [], "carry_over": [], "totals": {},
+               "events": [{"kind": "interrupted-run", "detail": "run-20261120-2012"}]}
+        open(os.path.join(cr.runs_dir(), rec["run_id"] + ".md"), "w").write("# r\n<!-- run-data: %s -->\n" % json.dumps(rec))
+        class A: run = None; hours = 24
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_advise(A)
+            except SystemExit:
+                pass
+        text = json.loads(buf.getvalue())["text"]
+        self.assertIn("Run-level: interrupted-run: run-20261120-2012", text)
+        self.assertIn("recovers by itself", text)
+        self.assertNotIn("Connectors", text)
 
 
 if __name__ == "__main__":

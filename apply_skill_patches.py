@@ -76,9 +76,13 @@ def patch_unattended(skill):
     if "swept_at = {}" in s:
         print("already applied")
         return 0
+    if "open_failed" in s:  # client-corpus 13.12 settles a failure on a later sweep itself (CR-2)
+        print("fixed upstream: nothing to patch")
+        return 0
     if any(s.count(old) != 1 for old, _ in UNATT_EDITS):
-        print("unattended.py is not the version the patch was written for; not patched", file=sys.stderr)
-        return 3
+        # Only the daily summary email is affected, so an unknown build must never stop a sweep: warn, carry on.
+        print("unattended.py is not a version the digest patch was written for; digest not patched", file=sys.stderr)
+        return 0
     for old, new in UNATT_EDITS:
         s = s.replace(old, new, 1)
     ast.parse(s)

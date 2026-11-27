@@ -852,9 +852,11 @@ def cmd_advise(a):
             lines.append("")
     for line in sorted(set(infra)):
         lines.append("Run-level: " + line)
-    if infra:
-        lines += ["  Do this: an unreachable source means a connector is signed out or failing: open Settings, Connectors and reconnect it, then the next run recovers by itself.",
-                  "  An interrupted run left an in-progress record: nothing is lost (the next run asks Drive from the older time); runs stay blocked for up to three hours.", ""]
+    if any(i.startswith("unreachable") for i in infra):
+        lines += ["  Do this: an unreachable source means a connector is signed out or failing: open Settings, Connectors and reconnect it, then the next run recovers by itself.", ""]
+    if any(i.startswith("interrupted-run") for i in infra):
+        lines += ["  An interrupted run stopped part-way: nothing is lost and the next run recovers by itself (it asks Drive from the older time). "
+                  "Act only if the digest lists clients under it as not swept since: run /sweep \"CLIENT\" for each.", ""]
     try:
         w = json.load(open(watch_path())).get("clients", {})
     except Exception:  # noqa: BLE001
