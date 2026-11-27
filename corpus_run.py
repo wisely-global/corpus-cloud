@@ -650,7 +650,8 @@ def status_map():
 
 def _status_of(v, extra=None):
     label = v if isinstance(v, str) else ""
-    m = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect"}
+    m = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect",
+         "Customer": "prospect"}      # Customer = a won deal awaiting onboarding: not delivering yet, so not swept or built
     m.update(extra or {})
     return m.get(label, label)
 

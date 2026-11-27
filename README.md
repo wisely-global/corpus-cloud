@@ -52,7 +52,7 @@ Python 3 and curl are used; the client-corpus skill must be synced into the envi
 
 ## Settings
 
-`status-map.json` (optional, in Wisely Shared Config): `{"Customer": "client"}` tells the runs how to read an Account Status label they do not know (`client`, `past-client` or `prospect`). It is how a person answers an unknown-status card.
+`status-map.json` (optional, in Wisely Shared Config): `{"Dormant": "past-client"}` tells the runs how to read an Account Status label they do not know (`client`, `past-client` or `prospect`). It is how a person answers an unknown-status card. Built in: Customer (a won deal awaiting onboarding) is read as a prospect.
 
 
 `GMAIL_SWEEP` (`on`/`off`, default `off`): the service account's mailbox holds no `Clients/*` labels, so Gmail is not swept by these runs. Client email reaches the corpus through people's own `/sweep` sessions, which file pending syncs that the hourly run applies.
