@@ -622,6 +622,10 @@ class QueueReconcile(unittest.TestCase):
     def test_no_corpus_folder_leaves_the_row_open(self):
         self.assertFalse(cr.queue_row_resolved("pending-entry", None, None, False)[0])
 
+    def test_a_duplicate_folder_row_closes_once_the_folder_is_one_and_has_no_corpus(self):
+        self.assertTrue(cr.queue_row_resolved("duplicate-titles", None, None, False)[0])
+        self.assertFalse(cr.queue_row_resolved("duplicate-titles", None, None, True)[0])
+
     def test_alias_rows_resolve_to_their_folder(self):
         m = cr.folder_lookup({"Barfoot & Thompson", "Mushroom Creative House Pty Ltd"},
                              [{"short": "Barfoot", "aliases": ["B&T"], "folder_name": "Barfoot & Thompson"},
@@ -747,6 +751,71 @@ class RegistryRows(unittest.TestCase):
                          [{"short": "Counties Manukau Sport", "folder_name": "Counties Manukau Sport", "aliases": ["CMS"]}])
         names = {"Mushroom Creative House Pty Ltd"}
         self.assertEqual(cr.resolve_folder("Mushroom CH", names, cr.folder_lookup(names, rows, {})), "Mushroom Creative House Pty Ltd")
+
+
+class BoardRowsForNoCorpus(unittest.TestCase):
+    def test_a_client_with_no_corpus_is_judged_from_the_board_rows_by_folder_id(self):
+        nc = {"NewCo": {"folder_id": "F1", "files": 9, "newest": "2026-10-01"}}
+        brows = {"F1": {"stage": "client", "client_id": None, "short": "NewCo", "item_id": "77"}}
+        self.assertEqual(cr.board_row("NewCo", nc["NewCo"], {}, brows), brows["F1"])
+        plan = cr.seed_plan(nc, {}, ["CL-0100"], {}, 10, "2026-11-28", brows)
+        self.assertEqual([(p["folder"], p["client_id"]) for p in plan], [("NewCo", "CL-0101")])
+
+    def test_seeding_covers_only_the_clients_inside_tonights_cap(self):
+        nc = {"Big": {"folder_id": "1", "files": 50, "newest": "2026-10-01"}, "Mid": {"folder_id": "2", "files": 40, "newest": "2026-10-01"},
+              "Low": {"folder_id": "3", "files": 5, "newest": "2026-10-01"}}
+        st = {"Big": {"stage": "client", "client_id": "CL-0001", "short": "Big", "item_id": "a"}, "Mid": {"stage": "client", "client_id": None, "short": "Mid", "item_id": "b"},
+              "Low": {"stage": "client", "client_id": None, "short": "Low", "item_id": "c"}}
+        plan = cr.seed_plan(nc, st, ["CL-0001"], {}, 2, "2026-11-28")          # Big (has ID) and Mid fill the cap; Low waits
+        self.assertEqual([p["folder"] for p in plan], ["Mid"])
+
+
+class StageFromRegistry(unittest.TestCase):
+    def test_a_registered_client_with_a_blank_board_status_keeps_its_registry_stage(self):
+        import json, tempfile, io, contextlib, argparse
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(os.path.join(tmp, cr.OPS, "corpus-runs"))
+        json.dump({"clients": [{"folder_name": "Alberts", "stage": "client"}, {"folder_name": "NoId", "stage": "client"}]}, open(os.path.join(tmp, cr.OPS, "corpus-index.json"), "w"))
+        cr.save("candidates.json", {"Alberts": {"folder_id": "FA"}, "NoId": {"folder_id": "FN"}})
+        items = [{"id": 1, "name": "Alberts", "column_values": {"status": {"index": 5}, "text_mm8pgmx8": "CL-0001", "link_mm2vffc2": "https://drive.google.com/drive/folders/FA"}},
+                 {"id": 2, "name": "NoId", "column_values": {"status": {"index": 5}, "link_mm2vffc2": "https://drive.google.com/drive/folders/FN"}}]
+        f = os.path.join(tmp, "b.json")
+        json.dump({"items": items}, open(f, "w"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_stages(argparse.Namespace(file=f))
+            except SystemExit:
+                pass
+        st = cr.load("stages.json")
+        self.assertEqual(st["Alberts"]["stage"], "client")      # had a Client ID: registry stage kept
+        self.assertEqual(st["NoId"]["stage"], "")               # no Client ID: still a missing fact
+
+
+class RequestsOrder(unittest.TestCase):
+    def test_older_requests_build_first_and_built_ones_never_crowd_the_list(self):
+        import json, tempfile, io, contextlib, argparse
+        tmp = tempfile.mkdtemp()
+        os.environ["STAGE_ROOT"] = tmp
+        os.environ["CORPUS_WORK"] = os.path.join(tmp, "work")
+        os.makedirs(os.path.join(tmp, cr.OPS, "corpus-requests"))
+        cr.save("run.json", {"run_id": "r", "since": "2026-01-01T00:00:00Z", "mode": "nightly", "started": 0, "interrupted": []})
+        d = os.path.join(tmp, cr.OPS, "corpus-requests")
+        for n in range(25):           # 25 already built, which used to fill the 20-file window
+            json.dump({"client": "Done%d" % n, "status": "built"}, open(os.path.join(d, "build-request-a%02d.json" % n), "w"))
+        json.dump({"client": "Zed", "status": "requested"}, open(os.path.join(d, "build-request-zed.json"), "w"))
+        json.dump({"client": "Alpha", "status": "requested"}, open(os.path.join(d, "build-request-alpha.json"), "w"))
+        os.utime(os.path.join(d, "build-request-zed.json"), (1, 1))          # filed earlier: builds first
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                cr.cmd_requests(argparse.Namespace())
+            except SystemExit:
+                pass
+        r = json.loads(buf.getvalue())
+        self.assertEqual([x["client"] for x in r["requested"]], ["Zed", "Alpha"])
 
 if __name__ == "__main__":
     unittest.main()

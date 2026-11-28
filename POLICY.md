@@ -92,7 +92,9 @@ Built: duplicate Accounts items for one client (`Serko` and `Serko Ltd.`), two t
 and an Account Status label the runs do not know. The last asks what the label means; a person answers by adding it to
 `status-map.json` in Wisely Shared Config (`{"Dormant": "past-client"}`), and the next run reads it.
 
-**Account Status words the runs know:** Client (swept, built), Past Client, Buying process (a prospect: skipped), and
+**A blank Account Status** (the board's default empty label) is an unset status, not an unknown one. A registered client (Client ID filled) keeps the stage its corpus brief records until the board says otherwise; an item with no Client ID and no status is a missing fact. Items still named `New item` (monday's default) are never read as a client.
+
+**Account Status words the runs know:** Client (swept, built), Past Client, Buying process (a prospect: skipped), **Partner / Vendor** (a supplier or partner, not a delivery client: skipped, no card), and
 **Customer: a won deal awaiting onboarding** (owner, 2026-11-28). A Customer is not delivering yet, so it is read as a
 prospect: not swept, not built, no card. When onboarding finishes and the status becomes Client, the normal path starts.
 A Customer account is also what a CRM lead conversion creates, which is how a duplicate such as `Serko Ltd.` appears.

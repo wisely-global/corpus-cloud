@@ -670,7 +670,7 @@ def status_map():
 def _status_of(v, extra=None):
     label = v if isinstance(v, str) else ""
     m = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect",
-         "Customer": "prospect"}      # Customer = a won deal awaiting onboarding: not delivering yet, so not swept or built
+         "Customer": "prospect", "Partner / Vendor": "prospect"}      # Partner / Vendor: a supplier or partner, not a delivery client, so not swept or built. Customer = a won deal awaiting onboarding: not delivering yet, so not swept or built
     m.update(extra or {})
     return m.get(label, label)
 
@@ -742,6 +742,21 @@ def cmd_stages(a):
             dupes.add(m.group(1))
         byid[m.group(1)] = {"short": cv.get("text_mm8pevdf") or it.get("name"), "stage": _status_of(cv.get("status"), status_map()),
                             "item_id": str(it.get("id")), "client_id": cv.get("text_mm8pgmx8")}
+    # A registered client (Client ID filled) whose board status is blank keeps the stage its corpus brief or the registry already
+    # records, so a blank label does not stop it being swept. The board still wins wherever it states a stage.
+    reg = {}
+    try:
+        for r in json.load(open(os.path.join(root(), OPS, "corpus-index.json"))).get("clients", []):
+            if r.get("folder_name") and r.get("stage") in ("client", "past-client", "prospect"):
+                reg[r["folder_name"]] = r["stage"]
+    except Exception:  # noqa: BLE001
+        pass
+    from_registry = []
+    for c, v in cands.items():
+        b = byid.get(v["folder_id"])
+        if b and not b["stage"] and b.get("client_id") and reg.get(c):
+            b["stage"] = reg[c]
+            from_registry.append(c)
     stages, missing, ambiguous = {}, [], []
     for c, v in cands.items():
         b = byid.get(v["folder_id"])
@@ -766,11 +781,13 @@ def cmd_stages(a):
     stages.update(fallback)
     missing = [c for c in missing if c not in fallback]
     json.dump(stages, open(os.path.join(work(), "stages.json"), "w"), indent=1)
+    # The board's own view of every linked folder, so clients that have no corpus yet (not in `cands`) can be judged too.
+    save("board_rows.json", {fid: row for fid, row in byid.items() if fid not in dupes})
     try:
         ncards = len(build_conflict_cards(items))
     except Exception as e:  # noqa: BLE001
         ncards = "cards not built: %s" % type(e).__name__
-    out({"ok": not ambiguous and not missing, "matched": len(stages) - len(fallback), "from_client_list": sorted(fallback), "conflict_cards": ncards,
+    out({"ok": not ambiguous and not missing, "matched": len(stages) - len(fallback), "from_client_list": sorted(fallback), "stage_from_registry": sorted(from_registry), "conflict_cards": ncards,
          "not_found": missing, "ambiguous": ambiguous, "stages_file": os.path.join(work(), "stages.json"),
          "next": "look up not_found clients on the board by name; ambiguous ones are skipped and recorded, never guessed" if (missing or ambiguous) else "run plan"},
         0 if not (missing or ambiguous) else 0)
@@ -898,14 +915,15 @@ def cmd_requests(a):
         out({"ok": False, "error": "build requests are for nightly runs"}, 3)
     d = os.path.join(root(), OPS, "corpus-requests")
     reqs = []
-    for f in sorted(glob.glob(os.path.join(d, "build-request-*.json")))[:20]:
+    # oldest request first (a request filed on an earlier night builds before tonight's), every file looked at before the status filter
+    for f in sorted(glob.glob(os.path.join(d, "build-request-*.json")), key=lambda p: (os.path.getmtime(p), p)):
         try:
             j = json.load(open(f))
         except Exception:  # noqa: BLE001
             continue
         if j.get("status") == "requested":
             reqs.append({"file": os.path.basename(f), "client": j.get("client"), "by": j.get("by")})
-    out({"ok": True, "requested": reqs[:2], "waiting": max(0, len(reqs) - 2)})
+    out({"ok": True, "requested": reqs[:BUILD_REQUEST_CAP], "waiting": max(0, len(reqs) - BUILD_REQUEST_CAP)})
 
 
 AI_EMAIL = "ai@wiselyglobal.tech"
@@ -952,6 +970,11 @@ def request_keys():
     return out
 
 
+def board_row(name, info, stages, board_rows):
+    """The Accounts board row for a client folder: from stages.json when the client has a corpus, else straight from the board by folder id."""
+    return stages.get(name) or (board_rows or {}).get(info.get("folder_id"))
+
+
 def cmd_build_requests(a):
     """File a corpus build request for every Client on the Accounts board whose Drive folder holds files and has no corpus
     (POLICY.md, Corpus builds). The nightly builds them into the shadow folder and promotes each when its checks pass; no
@@ -961,11 +984,11 @@ def cmd_build_requests(a):
     nc = load("no_corpus.json", None)
     if nc is None:
         out({"ok": False, "error": "no_corpus.json missing: run `discover` first"}, 3)
-    stages = load("stages.json", {}) or {}
+    stages, brows = load("stages.json", {}) or {}, load("board_rows.json", {}) or {}
     have = request_keys()
     filed, skipped, considered = [], {}, 0
     for name, info in sorted(nc.items(), key=lambda kv: -kv[1]["files"]):
-        row = stages.get(name)
+        row = board_row(name, info, stages, brows)
         short = (row or {}).get("short") or name
         has_req = cc.name_key(short) in have or cc.name_key(name) in have
         ok, why = build_request_decision(row, info["files"], has_req, len(filed), a.cap, newest=info.get("newest"), today=_nz_today())
@@ -993,18 +1016,23 @@ def cmd_build_requests(a):
     out({"ok": True, "filed": filed, "skipped": skipped, "clients_checked": considered, "cap": a.cap})
 
 
-def seed_plan(nc, stages, board_ids, have, cap, today):
-    """Client IDs to seed: board Clients with no Client ID whose folder would otherwise be filed (files, active, no request),
-    most files first, at most `cap`. IDs continue the board's own CL-NNNN sequence."""
+def seed_plan(nc, stages, board_ids, have, cap, today, board_rows=None):
+    """Client IDs to seed. Rank every board Client that would be filed tonight (files, active, no request; with or without an ID),
+    most files first; the first `cap` are the night's builds, and those without an ID are given the next `CL-NNNN` in the board's own sequence."""
     import corpus_conflicts as cc
     top = max([int(m.group(1)) for m in (re.match(r"^CL-(\d+)$", str(i or "")) for i in board_ids) if m] or [0])
-    plan = []
+    ranked = []
     for name, info in sorted(nc.items(), key=lambda kv: -kv[1]["files"]):
-        row = stages.get(name)
-        if len(plan) >= cap or not row or row.get("stage") != "client" or row.get("client_id") or not row.get("item_id") or row.get("from_list"):
+        row = board_row(name, info, stages, board_rows)
+        if not row or row.get("stage") != "client" or not row.get("item_id") or row.get("from_list"):
             continue
         short = row.get("short") or name
         if info["files"] < MIN_FILES or is_stale(info.get("newest"), today) or cc.name_key(short) in have or cc.name_key(name) in have:
+            continue
+        ranked.append((name, info, row, short))
+    plan = []
+    for name, info, row, short in ranked[:cap]:
+        if row.get("client_id"):
             continue
         top += 1
         plan.append({"folder": name, "item_id": row["item_id"], "short": short, "client_id": "CL-%04d" % top, "files": info["files"]})
@@ -1017,13 +1045,16 @@ def cmd_seed_client_ids(a):
     nc, stages = load("no_corpus.json", None), load("stages.json", {}) or {}
     if a.commit:
         plan = {p["item_id"]: p for p in (load("seed_plan.json", []) or [])}
-        done = []
-        for name, row in stages.items():
-            p = plan.get(str(row.get("item_id")))
-            if p and str(row.get("item_id")) in a.commit and not row.get("client_id"):
-                row["client_id"] = p["client_id"]
-                done.append({"client": p["short"], "client_id": p["client_id"]})
+        done, brows = [], load("board_rows.json", {}) or {}
+        for rows in (stages, brows):
+            for name, row in rows.items():
+                p = plan.get(str(row.get("item_id")))
+                if p and str(row.get("item_id")) in a.commit and not row.get("client_id"):
+                    row["client_id"] = p["client_id"]
+                    if not any(d["client_id"] == p["client_id"] for d in done):
+                        done.append({"client": p["short"], "client_id": p["client_id"]})
         save("stages.json", stages)
+        save("board_rows.json", brows)
         for d in done:
             event("maintainer-note", "%s: Client ID %s seeded on the Accounts board by the nightly run" % (d["client"], d["client_id"]))
         out({"ok": True, "committed": done, "not_committed": [i for i in a.commit if i not in plan]})
@@ -1033,7 +1064,7 @@ def cmd_seed_client_ids(a):
     raw = json.load(open(a.file))
     items = raw.get("items", raw) if isinstance(raw, dict) else raw
     ids = [(it.get("column_values", {}) or {}).get("text_mm8pgmx8") for it in items]
-    plan = seed_plan(nc, stages, ids, request_keys(), a.cap, _nz_today())
+    plan = seed_plan(nc, stages, ids, request_keys(), a.cap, _nz_today(), load("board_rows.json", {}) or {})
     save("seed_plan.json", plan)
     out({"ok": True, "assign": plan, "column": "text_mm8pgmx8 (Client ID)",
          "next": "write each client_id to its item with change_item_column_values (only that column), read the echo back, then run `R seed-client-ids --commit ITEM_ID...` for the ones that matched"})
@@ -1167,6 +1198,8 @@ def queue_row_resolved(reason, entries, stage_row, top_duplicate):
     if top_duplicate:
         return False, "two top-level folders still share this name"
     if entries is None:
+        if reason == "duplicate-titles":
+            return True, "the folder is no longer duplicated and holds no corpus, so there are no duplicate files"
         return False, "no corpus folder to check"
     files = [e for e in entries if not e.get("IsDir")]
     paths = [e["Path"] for e in files]
@@ -1273,6 +1306,8 @@ def cmd_queue_reconcile(a):
     stages, dups = load("stages.json", {}) or {}, load("dup_folders.json", {}) or {}
     top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
     names = {e["Name"] for e in top}
+    fid_of = {e["Name"]: e["ID"] for e in top}
+    brows = load("board_rows.json", {}) or {}
     look = folder_lookup(names, rows, stages)
     today, closed, left = _nz_today(), [], []
     for key, it in sorted(q.get("items", {}).items()):
@@ -1287,7 +1322,7 @@ def cmd_queue_reconcile(a):
             p = rclone(["lsjson", "clients:%s/%s" % (folder, KB), "-R", "--files-only", "--no-modtime"])
             if p.returncode == 0:
                 entries = [{"Path": e["Path"], "MimeType": e.get("MimeType", "")} for e in json.loads(p.stdout or "[]") or []]
-        ok, why = queue_row_resolved(it["reason"], entries, stages.get(folder), folder in dups)
+        ok, why = queue_row_resolved(it["reason"], entries, stages.get(folder) or brows.get(fid_of.get(folder)), folder in dups)
         if ok:
             it["status"], it["resolved_on"], it["resolved_by"] = "resolved", today, "live check: " + why
             closed.append({"row": key, "why": why})

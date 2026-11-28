@@ -46,9 +46,15 @@ class Detect(unittest.TestCase):
         items = cc.parse_items([raw("3", "Arnott's", "Dormant", None, None, "1P")])
         self.assertEqual(cc.unknown_statuses(items, {"Dormant": "past-client"}), {})
 
-    def test_an_unreadable_status_is_reported_not_ignored(self):
+    def test_a_blank_status_label_is_an_unset_status_not_an_unknown_one(self):
+        # the export shows the board's blank default label as a dict with an index and no text
         items = cc.parse_items([raw("4", "Mitre 10", {"changed_at": "x", "index": 5})])
-        self.assertTrue(cc.unknown_statuses(items))
+        self.assertEqual(cc.unknown_statuses(items), {})
+        self.assertIsNone(items[0]["status"])
+
+    def test_default_named_new_items_are_not_a_duplicate_client(self):
+        items = cc.parse_items([raw("5", "New item", None, None, None, "1A"), raw("6", "New item", None, None, None, "1A")])
+        self.assertEqual(cc.duplicate_accounts(items), [])
 
 
 class Cards(unittest.TestCase):
