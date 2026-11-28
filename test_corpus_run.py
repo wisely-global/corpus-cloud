@@ -736,5 +736,15 @@ class FolderMergeCommand(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(dups, {"Acme": ["L", "O"]})
 
+
+class RegistryRows(unittest.TestCase):
+    def test_client_list_blocks_give_aliases_and_the_drive_folder(self):
+        txt = ("# list\n\n### **Mushroom Group**\n\n- aliases: Mushroom Creative, MCH, Mushroom CH\n- drive: Mushroom Creative House Pty Ltd (18BeqIOkecy5Mv1kS5Z90UoTuujMNSBdf)\n- 7pace: yes\n"
+               "\n### **QA Electrical**\n\n- aliases: (none recorded yet)\n- drive: (not resolved)\n")
+        rows = cr.registry_rows(txt)
+        self.assertEqual(rows, [{"short": "Mushroom Group", "folder_name": "Mushroom Creative House Pty Ltd", "aliases": ["Mushroom Creative", "MCH", "Mushroom CH"]}])
+        names = {"Mushroom Creative House Pty Ltd"}
+        self.assertEqual(cr.resolve_folder("Mushroom CH", names, cr.folder_lookup(names, rows, {})), "Mushroom Creative House Pty Ltd")
+
 if __name__ == "__main__":
     unittest.main()

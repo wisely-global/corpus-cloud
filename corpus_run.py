@@ -1222,6 +1222,19 @@ def folder_lookup(folder_names, index_rows, stages):
     return {k: next(iter(v)) for k, v in claims.items() if len(v) == 1}
 
 
+def registry_rows(text):
+    """client-list.md -> [{short, aliases, folder_name}] from its '### **Name**' blocks (aliases and drive lines)."""
+    rows = []
+    for blk in re.split(r"\n### ", text or "")[1:]:
+        short = blk.split("\n", 1)[0].strip("* ").strip()
+        al = re.search(r"^- aliases:\s*(.+)$", blk, re.M)
+        dr = re.search(r"^- drive:\s*(.+?)\s*\(([A-Za-z0-9_-]{20,})\)\s*$", blk, re.M)
+        if dr:
+            rows.append({"short": short, "folder_name": dr.group(1).strip(),
+                         "aliases": [x.strip() for x in al.group(1).split(",")] if al and "(none" not in al.group(1) else []})
+    return rows
+
+
 def resolve_folder(client, folder_names, look):
     """The Drive folder a queue row's client name means: an exact folder name, else a registry name or alias, else a name that
     is the start of exactly one known name ('Barfoot' for 'Barfoot & Thompson', at least five letters). Never a guess between two."""
@@ -1251,6 +1264,10 @@ def cmd_queue_reconcile(a):
         rows = json.load(open(os.path.join(root(), OPS, "corpus-index.json"))).get("clients", [])
     except Exception:  # noqa: BLE001
         rows = []
+    try:      # the registry itself: an alias a person added is usable at once, before the next wrap regenerates the index
+        rows = rows + registry_rows(open(os.path.join(root(), OPS, "client-list.md"), encoding="utf-8").read())
+    except Exception:  # noqa: BLE001
+        pass
     stages, dups = load("stages.json", {}) or {}, load("dup_folders.json", {}) or {}
     top = json.loads(rclone(["lsjson", "clients:", "--dirs-only", "--no-modtime", "--no-mimetype"]).stdout)
     names = {e["Name"] for e in top}
