@@ -16,8 +16,8 @@ import re
 LEGAL = {"ltd", "limited", "pty", "inc", "incorporated", "llc", "plc", "nz", "au", "co", "company", "the", "group", "holdings"}
 # "Customer" is a won deal awaiting onboarding (owner, 2026-11-28): not delivering yet, so it is read as a prospect
 # (not swept, not built, no card) until the status becomes Client.
-KNOWN_STATUS = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect", "Customer": "prospect"}
-STATUS_MEANING = {"Customer": "a won deal awaiting onboarding"}
+KNOWN_STATUS = {"Client": "client", "Past Client": "past-client", "Buying process": "prospect", "Customer": "prospect", "Partner / Vendor": "prospect"}
+STATUS_MEANING = {"Customer": "a won deal awaiting onboarding", "Partner / Vendor": "a partner or supplier, not a delivery client"}
 KB = "Claude Project Knowledge Base"
 STAGES = ("client", "past-client", "prospect")
 FOLDER = "application/vnd.google-apps.folder"
@@ -49,10 +49,12 @@ def parse_items(raw_items, re_folder=r"/folders/([A-Za-z0-9_-]+)"):
     for it in raw_items:
         cv = it.get("column_values", {}) or {}
         st = cv.get("status")
-        label = st if isinstance(st, str) else None
+        # A status with no text is the board's blank default label (label id 5, "" in the column settings): an unset status,
+        # not an unknown one. The export shows it as a dict with an index and no label.
+        label = st if isinstance(st, str) and st else None
         m = re.search(re_folder, str(cv.get("link_mm2vffc2") or ""))
         out.append({"id": str(it.get("id")), "name": it.get("name") or "", "status": label,
-                    "status_unreadable": (st is not None and not isinstance(st, str)),
+                    "status_unreadable": False,
                     "short": cv.get("text_mm8pevdf"), "client_id": cv.get("text_mm8pgmx8"),
                     "folder_id": m.group(1) if m else None, "url": it.get("url") or "", "created": (it.get("created_at") or "")[:10]})
     return out
@@ -62,6 +64,8 @@ def duplicate_accounts(items):
     groups = {}
     for it in items:
         k = name_key(it["name"])
+        if k == "newitem":                # monday's default name for an item nobody has filled in is not a client
+            continue
         if k:
             groups.setdefault(k, []).append(it)
     return [g for g in groups.values() if len(g) > 1]
