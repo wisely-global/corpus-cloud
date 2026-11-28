@@ -1229,9 +1229,11 @@ def registry_rows(text):
         short = blk.split("\n", 1)[0].strip("* ").strip()
         al = re.search(r"^- aliases:\s*(.+)$", blk, re.M)
         dr = re.search(r"^- drive:\s*(.+?)\s*\(([A-Za-z0-9_-]{20,})\)\s*$", blk, re.M)
+        aliases = [x.strip() for x in al.group(1).split(",")] if al and "(none" not in al.group(1) else []
         if dr:
-            rows.append({"short": short, "folder_name": dr.group(1).strip(),
-                         "aliases": [x.strip() for x in al.group(1).split(",")] if al and "(none" not in al.group(1) else []})
+            rows.append({"short": short, "folder_name": dr.group(1).strip(), "aliases": aliases})
+        elif aliases:        # drive not resolved in the registry: the entry's own name is the best folder name; the caller checks it exists
+            rows.append({"short": short, "folder_name": short, "aliases": aliases})
     return rows
 
 
